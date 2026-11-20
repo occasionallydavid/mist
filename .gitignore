@@ -1,4 +1,4 @@
-/build/
-/crash-*
-/leak-*
-/timeout-*
+/core/build/
+/core/crash-*
+/core/leak-*
+/core/timeout-*

@@ -116,6 +116,10 @@ int mist_poll(mist_conn *conn, uint64_t now_us);
 int mist_next_event(mist_conn *conn, mist_event *event);
 
 int mist_open_stream(mist_conn *conn, uint32_t *stream_id);
+/* True once every outgoing byte and FIN on the stream are acknowledged. */
+int mist_stream_send_finished(const mist_conn *conn, uint32_t stream_id);
+/* True while the receiver owes an ACK. */
+int mist_ack_pending(const mist_conn *conn);
 size_t mist_stream_write(mist_conn *conn, uint32_t stream_id,
                          const uint8_t *data, size_t length);
 int mist_stream_finish(mist_conn *conn, uint32_t stream_id);

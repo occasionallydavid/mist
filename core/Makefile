@@ -11,14 +11,22 @@ endif
 AR ?= ar
 FUZZ_CC ?= $(or $(shell command -v clang),$(shell command -v clang-19),clang)
 BUILD ?= build
-CFLAGS ?= -O2 -g -msse4
+HOST_ARCH := $(shell uname -m)
+TARGET_ARCH := $(firstword $(subst -, ,$(shell $(CC) -dumpmachine)))
+ifeq ($(HOST_ARCH),$(TARGET_ARCH))
+ifneq ($(filter x86_64 i386 i486 i586 i686,$(TARGET_ARCH)),)
+NATIVE_CFLAGS := -march=native
+endif
+endif
+CFLAGS ?= -O2 -g $(NATIVE_CFLAGS)
 BENCH_MIB ?= 64
 INCLUDES = -Iinclude -Isrc -isystem third_party/simde
 WARNINGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 SOURCES = src/mist.c src/handshake.c src/packet.c src/stream.c src/schedule.c \
           src/ack.c src/loss.c src/crypto/primitives.c src/crypto/blake2s.c src/crypto/noise.c
-HEADERS = include/mist.h src/internal.h src/crypto/crypto.h
-CHACHA_HEADERS = $(wildcard src/crypto/dolbeau/*.h third_party/simde/simde/*.h) \
+HEADERS = include/mist.h src/internal.h src/crypto/crypto.h \
+          src/crypto/poly1305_simd.h
+CHACHA_HEADERS = src/crypto/dolbeau.h $(wildcard third_party/simde/simde/*.h) \
                  third_party/simde/simde/wasm/simd128.h
 OBJECTS = $(SOURCES:%.c=$(BUILD)/%.o)
 TESTS = $(BUILD)/test_crypto $(BUILD)/test_transport

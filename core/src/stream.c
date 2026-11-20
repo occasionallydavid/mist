@@ -241,6 +241,17 @@ size_t mist_stream_write(mist_conn *c, uint32_t id, const uint8_t *data, size_t 
     return accepted;
 }
 
+int mist_stream_send_finished(const mist_conn *c, uint32_t id)
+{
+    if (!c || c->state != ESTABLISHED || is_message(id))
+        return 0;
+    const stream_class *sc = &c->classes[id & 3u];
+    if ((id >> 2) < sc->retired)
+        return 1;
+    const stream *s = find_stream(c, id);
+    return s && s->tx_fin_acked && !s->head;
+}
+
 int mist_stream_finish(mist_conn *c, uint32_t id)
 {
     stream *s = writable_stream(c, id);

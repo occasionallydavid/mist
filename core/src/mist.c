@@ -298,3 +298,8 @@ int mist_get_stats(const mist_conn *c, mist_stats *stats)
     stats->next_packet_number = c->tx_number;
     return MIST_OK;
 }
+
+int mist_ack_pending(const mist_conn *c)
+{
+    return c && c->ack_pending;
+}

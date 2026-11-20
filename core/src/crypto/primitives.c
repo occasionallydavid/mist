@@ -54,17 +54,14 @@
 // Extracted from Monocypher 4.0.3. See README.md for provenance.
 #include "crypto.h"
 
-#include <simde/wasm/simd128.h>
+#include "dolbeau.h"
 
-#if defined(__wasm__) && !defined(__wasm_simd128__)
-#error "MIST requires -msimd128 for WebAssembly"
-#endif
+#include <string.h>
 
 #define FOR_T(type, i, start, end) for (type i = (start); i < (end); i++)
 #define FOR(i, start, end)         FOR_T(size_t, i, start, end)
 #define COPY(dst, src, size)       FOR(_i_, 0, size) (dst)[_i_] = (src)[_i_]
 #define ZERO(buf, size)            FOR(_i_, 0, size) (buf)[_i_] = 0
-#define MIN(a, b)                  ((a) <= (b) ? (a) : (b))
 typedef uint8_t  u8;
 typedef uint32_t u32;
 typedef int32_t  i32;
@@ -72,16 +69,6 @@ typedef int64_t  i64;
 typedef uint64_t u64;
 
 static const u8 zero[128] = {0};
-// returns the smallest positive integer y such that
-// (x + y) % pow_2  == 0
-// Basically, y is the "gap" missing to align x.
-// Only works when pow_2 is a power of 2.
-// Note: we use ~x+1 instead of -x to avoid compiler warnings
-static size_t gap(size_t x, size_t pow_2)
-{
-	return (~x + 1) & (pow_2 - 1);
-}
-
 static u32 load24_le(const u8 s[3])
 {
 	return
@@ -119,22 +106,6 @@ static void load32_le_buf (u32 *dst, const u8 *src, size_t size) {
 /////////////////
 /// Chacha 20 ///
 /////////////////
-#if SIMDE_ENDIAN_ORDER != SIMDE_ENDIAN_LITTLE
-#error "The Dolbeau ChaCha20 kernel requires little-endian vectors"
-#endif
-
-#define ROUNDS 20
-#define DOLBEAU_SHUFFLE32(v, imm) simde_wasm_i32x4_shuffle((v), (v), \
-    (imm) & 3, ((imm) >> 2) & 3, ((imm) >> 4) & 3, (imm) >> 6)
-#define DOLBEAU_UNPACKLO32(a, b) simde_wasm_i32x4_shuffle((a), (b), 0, 4, 1, 5)
-#define DOLBEAU_UNPACKHI32(a, b) simde_wasm_i32x4_shuffle((a), (b), 2, 6, 3, 7)
-#define DOLBEAU_UNPACKLO64(a, b) simde_wasm_i64x2_shuffle((a), (b), 0, 2)
-#define DOLBEAU_UNPACKHI64(a, b) simde_wasm_i64x2_shuffle((a), (b), 1, 3)
-#define DOLBEAU_ROT16(v) simde_wasm_i8x16_shuffle((v), (v), \
-    2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)
-#define DOLBEAU_ROT8(v) simde_wasm_i8x16_shuffle((v), (v), \
-    3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14)
-
 /* MIST packet sizes and starting counters (0 or 1) keep the upstream
  * counter carry from reaching x[13], the first IETF nonce word. */
 static void crypto_chacha20_ietf(u8 *c, const u8 *m, size_t bytes,
@@ -147,191 +118,64 @@ static void crypto_chacha20_ietf(u8 *c, const u8 *m, size_t bytes,
     x[12] = counter;
     load32_le_buf(x + 13, nonce, 3);
 
-#include "dolbeau/u4.h"
-#include "dolbeau/u1.h"
-#include "dolbeau/u0.h"
+    chacha20_dolbeau(x, m, c, bytes);
 }
 
-#undef DOLBEAU_ROT8
-#undef DOLBEAU_ROT16
-#undef DOLBEAU_UNPACKHI64
-#undef DOLBEAU_UNPACKLO64
-#undef DOLBEAU_UNPACKHI32
-#undef DOLBEAU_UNPACKLO32
-#undef DOLBEAU_SHUFFLE32
-#undef ROUNDS
+static u64 load64_le(const u8 p[8])
+{
+    return (u64)load32_le(p) | (u64)load32_le(p + 4) << 32;
+}
 
-// Incremental interface
+#include "poly1305_simd.h"
+
+/* The staging buffer fits one complete MIST AEAD transcript. Larger inputs
+ * use the same kernel in chunks. Each flushed chunk contains whole pairs
+ * of Poly1305 blocks.
+ */
 typedef struct {
-	// Do not rely on the size or contents of this type,
-	// for they may change without notice.
-	uint8_t  c[16];  // chunk of the message
-	size_t   c_idx;  // How many bytes are there in the chunk.
-	uint32_t r  [4]; // constant multiplier (from the secret key)
-	uint32_t pad[4]; // random number added at the end (from the secret key)
-	uint32_t h  [5]; // accumulated hash
-} crypto_poly1305_ctx;
+    poly1305_state_internal state;
+    u8 bytes[1248];
+    size_t used;
+} poly1305_transcript;
 
-/////////////////
-/// Poly 1305 ///
-/////////////////
-
-// h = (h + c) * r
-// preconditions:
-//   ctx->h <= 4_ffffffff_ffffffff_ffffffff_ffffffff
-//   ctx->r <=   0ffffffc_0ffffffc_0ffffffc_0fffffff
-//   end    <= 1
-// Postcondition:
-//   ctx->h <= 4_ffffffff_ffffffff_ffffffff_ffffffff
-static void poly_blocks(crypto_poly1305_ctx *ctx, const u8 *in,
-                        size_t nb_blocks, unsigned end)
+static void poly1305_append(poly1305_transcript *transcript, const u8 *bytes, size_t size)
 {
-	// Local all the things!
-	const u32 r0 = ctx->r[0];
-	const u32 r1 = ctx->r[1];
-	const u32 r2 = ctx->r[2];
-	const u32 r3 = ctx->r[3];
-	const u32 rr0 = (r0 >> 2) * 5;  // lose 2 bits...
-	const u32 rr1 = (r1 >> 2) + r1; // rr1 == (r1 >> 2) * 5
-	const u32 rr2 = (r2 >> 2) + r2; // rr1 == (r2 >> 2) * 5
-	const u32 rr3 = (r3 >> 2) + r3; // rr1 == (r3 >> 2) * 5
-	const u32 rr4 = r0 & 3;         // ...recover 2 bits
-	u32 h0 = ctx->h[0];
-	u32 h1 = ctx->h[1];
-	u32 h2 = ctx->h[2];
-	u32 h3 = ctx->h[3];
-	u32 h4 = ctx->h[4];
-
-	FOR (i, 0, nb_blocks) {
-		// h + c, without carry propagation
-		const u64 s0 = (u64)h0 + load32_le(in);  in += 4;
-		const u64 s1 = (u64)h1 + load32_le(in);  in += 4;
-		const u64 s2 = (u64)h2 + load32_le(in);  in += 4;
-		const u64 s3 = (u64)h3 + load32_le(in);  in += 4;
-		const u32 s4 =      h4 + end;
-
-		// (h + c) * r, without carry propagation
-		const u64 x0 = s0*r0+ s1*rr3+ s2*rr2+ s3*rr1+ s4*rr0;
-		const u64 x1 = s0*r1+ s1*r0 + s2*rr3+ s3*rr2+ s4*rr1;
-		const u64 x2 = s0*r2+ s1*r1 + s2*r0 + s3*rr3+ s4*rr2;
-		const u64 x3 = s0*r3+ s1*r2 + s2*r1 + s3*r0 + s4*rr3;
-		const u32 x4 =                                s4*rr4;
-
-		// partial reduction modulo 2^130 - 5
-		const u32 u5 = (u32)(x3 >> 32) + x4; // u5 <= 7ffffff5
-		const u64 u0 = (u32)(u5 >>  2) * 5 + (x0 & 0xffffffff);
-		const u64 u1 = (u32)(u0 >> 32)     + (x1 & 0xffffffff) + (x0 >> 32);
-		const u64 u2 = (u32)(u1 >> 32)     + (x2 & 0xffffffff) + (x1 >> 32);
-		const u64 u3 = (u32)(u2 >> 32)     + (x3 & 0xffffffff) + (x2 >> 32);
-		const u32 u4 = (u32)(u3 >> 32)     + (u5 & 3); // u4 <= 4
-
-		// Update the hash
-		h0 = u0 & 0xffffffff;
-		h1 = u1 & 0xffffffff;
-		h2 = u2 & 0xffffffff;
-		h3 = u3 & 0xffffffff;
-		h4 = u4;
-	}
-	ctx->h[0] = h0;
-	ctx->h[1] = h1;
-	ctx->h[2] = h2;
-	ctx->h[3] = h3;
-	ctx->h[4] = h4;
+    while (size) {
+        size_t count = sizeof transcript->bytes - transcript->used;
+        if (count > size)
+            count = size;
+        memcpy(transcript->bytes + transcript->used, bytes, count);
+        transcript->used += count;
+        bytes += count;
+        size -= count;
+        if (transcript->used == sizeof transcript->bytes) {
+            poly1305_blocks_simd(&transcript->state, transcript->bytes, transcript->used);
+            transcript->used = 0;
+        }
+    }
 }
 
-static void crypto_poly1305_init(crypto_poly1305_ctx *ctx, const u8 key[32])
-{
-	ZERO(ctx->h, 5); // Initial hash is zero
-	ctx->c_idx = 0;
-	// load r and pad (r has some of its bits cleared)
-	load32_le_buf(ctx->r  , key   , 4);
-	load32_le_buf(ctx->pad, key+16, 4);
-	FOR (i, 0, 1) { ctx->r[i] &= 0x0fffffff; }
-	FOR (i, 1, 4) { ctx->r[i] &= 0x0ffffffc; }
-}
-
-static void crypto_poly1305_update(crypto_poly1305_ctx *ctx,
-                            const u8 *message, size_t message_size)
-{
-	// Avoid undefined NULL pointer increments with empty messages
-	if (message_size == 0) {
-		return;
-	}
-
-	// Align ourselves with block boundaries
-	size_t aligned = MIN(gap(ctx->c_idx, 16), message_size);
-	FOR (i, 0, aligned) {
-		ctx->c[ctx->c_idx] = *message;
-		ctx->c_idx++;
-		message++;
-		message_size--;
-	}
-
-	// If block is complete, process it
-	if (ctx->c_idx == 16) {
-		poly_blocks(ctx, ctx->c, 1, 1);
-		ctx->c_idx = 0;
-	}
-
-	// Process the message block by block
-	size_t nb_blocks = message_size >> 4;
-	poly_blocks(ctx, message, nb_blocks, 1);
-	message      += nb_blocks << 4;
-	message_size &= 15;
-
-	// remaining bytes (we never complete a block here)
-	FOR (i, 0, message_size) {
-		ctx->c[ctx->c_idx] = message[i];
-		ctx->c_idx++;
-	}
-}
-
-static void crypto_poly1305_final(crypto_poly1305_ctx *ctx, u8 mac[16])
-{
-	// Process the last block (if any)
-	// We move the final 1 according to remaining input length
-	// (this will add less than 2^130 to the last input block)
-	if (ctx->c_idx != 0) {
-		ZERO(ctx->c + ctx->c_idx, 16 - ctx->c_idx);
-		ctx->c[ctx->c_idx] = 1;
-		poly_blocks(ctx, ctx->c, 1, 0);
-	}
-
-	// check if we should subtract 2^130-5 by performing the
-	// corresponding carry propagation.
-	u64 c = 5;
-	FOR (i, 0, 4) {
-		c  += ctx->h[i];
-		c >>= 32;
-	}
-	c += ctx->h[4];
-	c  = (c >> 2) * 5; // shift the carry back to the beginning
-	// c now indicates how many times we should subtract 2^130-5 (0 or 1)
-	FOR (i, 0, 4) {
-		c += (u64)ctx->h[i] + ctx->pad[i];
-		store32_le(mac + i*4, (u32)c);
-		c = c >> 32;
-	}
-}
-
-////////////////////////////////
-/// Authenticated encryption ///
-////////////////////////////////
-static void lock_auth(u8 mac[16], const u8  auth_key[32],
-                      const u8 *ad         , size_t ad_size,
+static void lock_auth(u8 mac[16], const u8 auth_key[32],
+                      const u8 *ad, size_t ad_size,
                       const u8 *cipher_text, size_t text_size)
 {
-	u8 sizes[16];
-	store64_le(sizes + 0, ad_size);
-	store64_le(sizes + 8, text_size);
-	crypto_poly1305_ctx poly_ctx;
-	crypto_poly1305_init  (&poly_ctx, auth_key);
-	crypto_poly1305_update(&poly_ctx, ad         , ad_size);
-	crypto_poly1305_update(&poly_ctx, zero       , gap(ad_size, 16));
-	crypto_poly1305_update(&poly_ctx, cipher_text, text_size);
-	crypto_poly1305_update(&poly_ctx, zero       , gap(text_size, 16));
-	crypto_poly1305_update(&poly_ctx, sizes      , 16);
-	crypto_poly1305_final (&poly_ctx, mac);
+    poly1305_transcript transcript;
+    transcript.used = 0;
+    poly1305_init_simd(&transcript.state, auth_key);
+    u8 sizes[16];
+    store64_le(sizes, ad_size);
+    store64_le(sizes + 8, text_size);
+
+    poly1305_append(&transcript, ad, ad_size);
+    poly1305_append(&transcript, zero, (0u - ad_size) & 15);
+    poly1305_append(&transcript, cipher_text, text_size);
+    poly1305_append(&transcript, zero, (0u - text_size) & 15);
+    poly1305_append(&transcript, sizes, sizeof sizes);
+    size_t blocks = transcript.used & ~(size_t)31;
+    if (blocks)
+        poly1305_blocks_simd(&transcript.state, transcript.bytes, blocks);
+    poly1305_finish_ext_simd(&transcript.state, transcript.bytes + blocks,
+                            transcript.used - blocks, mac);
 }
 
 ////////////////////////////////////

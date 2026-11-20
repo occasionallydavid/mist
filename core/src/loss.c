@@ -140,7 +140,7 @@ static unsigned oldest_before_ack(const mist_conn *c)
 {
     if (c->largest_acked_valid && c->flight_packets) {
         unsigned slot = flight_slot_at_or_after(c, c->sent_cursor);
-        if (c->sent[slot].number < c->largest_acked)
+        if (slot < TX_HISTORY && c->sent[slot].number < c->largest_acked)
             return slot;
     }
     return NO_SLOT;
