@@ -1,0 +1,7 @@
+libsodium 1.0.20, commit 9511c982fb1d046470a8b42aa36556cdb7da15de
+https://github.com/jedisct1/libsodium/tree/9511c982fb1d046470a8b42aa36556cdb7da15de/src/libsodium/crypto_stream/chacha20/dolbeau
+
+u0.h, u1.h, and u4.h come from the Dolbeau SSSE3 implementation. The
+intrinsics map to SIMDe's Wasm SIMD128 operations. The fixed byte masks
+are expressed as immediate shuffles. The integration removes the explicit
+wipe of the partial block. See LICENSE.

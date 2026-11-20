@@ -20,7 +20,7 @@ Run `make bench` for a 64 MiB transfer or `make bench BENCH_MIB=256` to change t
 
 ## SIMD128 build
 
-ChaCha20 uses 128-bit compiler vectors in every build. Build with GCC 12 or newer, or Clang. When targeting WebAssembly, compile with `-msimd128`. The resulting module uses standard Wasm SIMD128 instructions, and wasm2c uses [SIMDe headers](https://github.com/simd-everywhere/simde) when compiling the translated C. [WABT SIMD support](https://github.com/WebAssembly/wabt#supported-proposals)
+ChaCha20 uses the four-block Dolbeau kernel from libsodium with SIMDe's Wasm SIMD128 intrinsics. Both dependencies are bundled. When targeting WebAssembly, compile with `-msimd128`. The translated C can use the bundled SIMDe headers via `-Ithird_party/simde`. [Kernel provenance](src/crypto/dolbeau/UPSTREAM), [SIMDe provenance](third_party/simde/UPSTREAM)
 
 ## Drive a connection
 
@@ -44,6 +44,6 @@ A responder object represents one connection slot. A UDP listener should bound t
 
 ## Cryptography and tests
 
-The X25519 field arithmetic and ChaCha20 and Poly1305 cores come from Monocypher 4.0.3 under its BSD-2-Clause or CC0-1.0 terms. The extracted source retains its notices. MIST uses the IETF AEAD layout, BLAKE2s, and the exact Noise IK prologue and payloads specified for MIST/1. [Monocypher 4.0.3](https://github.com/LoupVaillant/Monocypher/tree/4.0.3), [Noise revision 34](https://noiseprotocol.org/noise.html), [RFC 7748](https://www.rfc-editor.org/rfc/rfc7748), [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439), [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693)
+The X25519 field arithmetic and Poly1305 core come from Monocypher 4.0.3 under its BSD-2-Clause or CC0-1.0 terms. The extracted source retains its notices. MIST uses the IETF AEAD layout, BLAKE2s, and the exact Noise IK prologue and payloads specified for MIST/1. [Monocypher 4.0.3](https://github.com/LoupVaillant/Monocypher/tree/4.0.3), [Noise revision 34](https://noiseprotocol.org/noise.html), [RFC 7748](https://www.rfc-editor.org/rfc/rfc7748), [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439), [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693)
 
 The tests include cryptographic vectors, a MIST handshake vector derived independently and cross-checked against Cacophony, and a two-endpoint virtual network with loss, delay, duplication, reordering, truncation, and corruption. The fuzz harness exercises both raw datagrams and authenticated frame processing. The protocol and this implementation have not undergone independent security review. [Cacophony test vectors](https://github.com/rweather/noise-c/blob/master/tests/vector/cacophony.txt)

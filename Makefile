@@ -11,13 +11,15 @@ endif
 AR ?= ar
 FUZZ_CC ?= $(or $(shell command -v clang),$(shell command -v clang-19),clang)
 BUILD ?= build
-CFLAGS ?= -O2 -g
+CFLAGS ?= -O2 -g -msse4
 BENCH_MIB ?= 64
-INCLUDES = -Iinclude -Isrc
+INCLUDES = -Iinclude -Isrc -isystem third_party/simde
 WARNINGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 SOURCES = src/mist.c src/handshake.c src/packet.c src/stream.c src/schedule.c \
           src/ack.c src/loss.c src/crypto/primitives.c src/crypto/blake2s.c src/crypto/noise.c
 HEADERS = include/mist.h src/internal.h src/crypto/crypto.h
+CHACHA_HEADERS = $(wildcard src/crypto/dolbeau/*.h third_party/simde/simde/*.h) \
+                 third_party/simde/simde/wasm/simd128.h
 OBJECTS = $(SOURCES:%.c=$(BUILD)/%.o)
 TESTS = $(BUILD)/test_crypto $(BUILD)/test_transport
 
@@ -30,6 +32,8 @@ $(BUILD)/libmist.a: $(OBJECTS)
 $(BUILD)/%.o: %.c Makefile
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(CFLAGS) $(WARNINGS) $(LTO) -MMD -MP -c $< -o $@
+
+$(BUILD)/src/crypto/primitives.o: $(CHACHA_HEADERS)
 
 $(BUILD)/test_%: tests/test_%.c $(BUILD)/libmist.a $(HEADERS)
 	$(CC) $(CPPFLAGS) $(INCLUDES) $(CFLAGS) $(WARNINGS) $(LTO) $(filter-out %.h,$^) $(LTO_LDFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
@@ -49,7 +53,7 @@ sanitize:
 
 fuzz: $(BUILD)/fuzz_packet
 
-$(BUILD)/fuzz_packet: tests/fuzz_packet.c $(SOURCES) $(HEADERS)
+$(BUILD)/fuzz_packet: tests/fuzz_packet.c $(SOURCES) $(HEADERS) $(CHACHA_HEADERS)
 	@mkdir -p $(@D)
 	$(FUZZ_CC) $(CPPFLAGS) $(INCLUDES) $(WARNINGS) -O1 -g -fno-omit-frame-pointer \
 	    -fsanitize=fuzzer,address,undefined $(filter-out %.h,$^) $(LDFLAGS) $(LDLIBS) -o $@

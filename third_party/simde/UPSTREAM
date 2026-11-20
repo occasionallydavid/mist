@@ -1,0 +1,5 @@
+SIMDe v0.8.2
+https://github.com/simd-everywhere/simde/tree/v0.8.2
+
+Contains simde/wasm/simd128.h and its local include dependencies, copied
+without changes. See COPYING and the notices in the headers.

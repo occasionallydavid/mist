@@ -54,7 +54,7 @@
 // Extracted from Monocypher 4.0.3. See README.md for provenance.
 #include "crypto.h"
 
-#include <stdbool.h>
+#include <simde/wasm/simd128.h>
 
 #if defined(__wasm__) && !defined(__wasm_simd128__)
 #error "MIST requires -msimd128 for WebAssembly"
@@ -119,134 +119,47 @@ static void load32_le_buf (u32 *dst, const u8 *src, size_t size) {
 /////////////////
 /// Chacha 20 ///
 /////////////////
-typedef u32 chacha_vec __attribute__((vector_size(16)));
-
-#define VSHUFFLE(x, a, b, c, d) __builtin_shufflevector(x, x, a, b, c, d)
-
-static inline chacha_vec chacha20_rotl(chacha_vec x, unsigned n)
-{
-    return (x << n) | (x >> (32 - n));
-}
-
-static inline void chacha20_quarter(chacha_vec *a, chacha_vec *b,
-                                    chacha_vec *c, chacha_vec *d)
-{
-    *a += *b;
-    *d = chacha20_rotl(*d ^ *a, 16);
-    *c += *d;
-    *b = chacha20_rotl(*b ^ *c, 12);
-    *a += *b;
-    *d = chacha20_rotl(*d ^ *a, 8);
-    *c += *d;
-    *b = chacha20_rotl(*b ^ *c, 7);
-}
-
-typedef struct {
-    chacha_vec a, b, c, d;
-} chacha20_rows;
-
-static inline void chacha20_permute(chacha20_rows *s, bool diagonal)
-{
-    s->b = diagonal ? VSHUFFLE(s->b, 1, 2, 3, 0) : VSHUFFLE(s->b, 3, 0, 1, 2);
-    s->c = VSHUFFLE(s->c, 2, 3, 0, 1);
-    s->d = diagonal ? VSHUFFLE(s->d, 3, 0, 1, 2) : VSHUFFLE(s->d, 1, 2, 3, 0);
-}
-
-static inline chacha_vec load_vector(const u32 words[4])
-{
-    chacha_vec v;
-    __builtin_memcpy(&v, words, sizeof v);
-    return v;
-}
-
-static inline void chacha20_store(u8 out[16], const u8 text[16], chacha_vec block)
-{
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    chacha_vec v;
-    __builtin_memcpy(&v, text, sizeof v);
-    v ^= block;
-    __builtin_memcpy(out, &v, sizeof v);
-#else
-    for (unsigned i = 0; i < 4; ++i)
-        store32_le(out + i * 4, block[i] ^ load32_le(text + i * 4));
+#if SIMDE_ENDIAN_ORDER != SIMDE_ENDIAN_LITTLE
+#error "The Dolbeau ChaCha20 kernel requires little-endian vectors"
 #endif
-}
 
-static inline void chacha20_vectors(u8 *out, const u8 *text, const u32 input[16], bool two)
-{
-    chacha20_rows initial = {
-        load_vector(input), load_vector(input + 4),
-        load_vector(input + 8), load_vector(input + 12)
-    };
-    chacha20_rows next = initial;
-    if (two)
-        next.d += (chacha_vec){1, 0, 0, 0};
-    chacha20_rows s = initial, t = next;
+#define ROUNDS 20
+#define DOLBEAU_SHUFFLE32(v, imm) simde_wasm_i32x4_shuffle((v), (v), \
+    (imm) & 3, ((imm) >> 2) & 3, ((imm) >> 4) & 3, (imm) >> 6)
+#define DOLBEAU_UNPACKLO32(a, b) simde_wasm_i32x4_shuffle((a), (b), 0, 4, 1, 5)
+#define DOLBEAU_UNPACKHI32(a, b) simde_wasm_i32x4_shuffle((a), (b), 2, 6, 3, 7)
+#define DOLBEAU_UNPACKLO64(a, b) simde_wasm_i64x2_shuffle((a), (b), 0, 2)
+#define DOLBEAU_UNPACKHI64(a, b) simde_wasm_i64x2_shuffle((a), (b), 1, 3)
+#define DOLBEAU_ROT16(v) simde_wasm_i8x16_shuffle((v), (v), \
+    2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)
+#define DOLBEAU_ROT8(v) simde_wasm_i8x16_shuffle((v), (v), \
+    3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14)
 
-    /* Each lane runs one column. Shift rows to run the diagonal round.
-     * Interleave two independent counters when both blocks are available. */
-    for (unsigned i = 0; i < 10; ++i) {
-        chacha20_quarter(&s.a, &s.b, &s.c, &s.d);
-        if (two)
-            chacha20_quarter(&t.a, &t.b, &t.c, &t.d);
-        chacha20_permute(&s, true);
-        if (two)
-            chacha20_permute(&t, true);
-        chacha20_quarter(&s.a, &s.b, &s.c, &s.d);
-        if (two)
-            chacha20_quarter(&t.a, &t.b, &t.c, &t.d);
-        chacha20_permute(&s, false);
-        if (two)
-            chacha20_permute(&t, false);
-    }
-    chacha20_store(out,      text,      s.a + initial.a);
-    chacha20_store(out + 16, text + 16, s.b + initial.b);
-    chacha20_store(out + 32, text + 32, s.c + initial.c);
-    chacha20_store(out + 48, text + 48, s.d + initial.d);
-    if (two) {
-        chacha20_store(out + 64,  text + 64,  t.a + next.a);
-        chacha20_store(out + 80,  text + 80,  t.b + next.b);
-        chacha20_store(out + 96,  text + 96,  t.c + next.c);
-        chacha20_store(out + 112, text + 112, t.d + next.d);
-    }
-}
-
-#undef VSHUFFLE
-
-static void crypto_chacha20_ietf(u8 *out, const u8 *text, size_t size,
+/* MIST packet sizes and starting counters (0 or 1) keep the upstream
+ * counter carry from reaching x[13], the first IETF nonce word. */
+static void crypto_chacha20_ietf(u8 *c, const u8 *m, size_t bytes,
                                const u8 key[32], const u8 nonce[12], u32 counter)
 {
     static const u8 constant[16] = "expand 32-byte k";
-    u32 input[16];
-    load32_le_buf(input, constant, 4);
-    load32_le_buf(input + 4, key, 8);
-    input[12] = counter;
-    load32_le_buf(input + 13, nonce, 3);
+    u32 x[16];
+    load32_le_buf(x, constant, 4);
+    load32_le_buf(x + 4, key, 8);
+    x[12] = counter;
+    load32_le_buf(x + 13, nonce, 3);
 
-    while (text && size >= 128) {
-        chacha20_vectors(out, text, input, true);
-        input[12] += 2;
-        out += 128;
-        text += 128;
-        size -= 128;
-    }
-    while (size >= 64) {
-        chacha20_vectors(out, text ? text : zero, input, false);
-        ++input[12];
-        out += 64;
-        if (text)
-            text += 64;
-        size -= 64;
-    }
-    if (size) {
-        u8 block[64];
-        chacha20_vectors(block, zero, input, false);
-        if (!text)
-            text = zero;
-        for (size_t i = 0; i < size; ++i)
-            out[i] = block[i] ^ text[i];
-    }
+#include "dolbeau/u4.h"
+#include "dolbeau/u1.h"
+#include "dolbeau/u0.h"
 }
+
+#undef DOLBEAU_ROT8
+#undef DOLBEAU_ROT16
+#undef DOLBEAU_UNPACKHI64
+#undef DOLBEAU_UNPACKLO64
+#undef DOLBEAU_UNPACKHI32
+#undef DOLBEAU_UNPACKLO32
+#undef DOLBEAU_SHUFFLE32
+#undef ROUNDS
 
 // Incremental interface
 typedef struct {
@@ -935,7 +848,7 @@ void mist_aead_seal(uint8_t *out, const uint8_t *in, size_t n,
                     const uint8_t key[32], const uint8_t nonce[12])
 {
     uint8_t poly_key[32];
-    crypto_chacha20_ietf(poly_key, NULL, sizeof poly_key, key, nonce, 0);
+    crypto_chacha20_ietf(poly_key, zero, sizeof poly_key, key, nonce, 0);
     crypto_chacha20_ietf(out, in, n, key, nonce, 1);
     lock_auth(out + n, poly_key, ad, ad_len, out, n);
 }
@@ -945,7 +858,7 @@ int mist_aead_open(uint8_t *out, const uint8_t *in, size_t n,
                    const uint8_t key[32], const uint8_t nonce[12])
 {
     uint8_t poly_key[32], tag[16];
-    crypto_chacha20_ietf(poly_key, NULL, sizeof poly_key, key, nonce, 0);
+    crypto_chacha20_ietf(poly_key, zero, sizeof poly_key, key, nonce, 0);
     lock_auth(tag, poly_key, ad, ad_len, in, n);
     int valid = mist_equal(tag, in + n, sizeof tag);
     if (valid)
