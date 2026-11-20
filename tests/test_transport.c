@@ -263,6 +263,45 @@ static void reordering_and_transaction(void)
     destroy(p);
 }
 
+static void receive_bitmap_boundaries(void)
+{
+    pair p = endpoints(NULL);
+    handshake(&p);
+    uint8_t data[PAGE_SIZE + 21], f[MAX_PLAINTEXT];
+    for (size_t i = 0; i < sizeof data; ++i)
+        data[i] = (uint8_t)(i * 37u);
+
+    size_t n = stream_frame(f, 0, 63, false, data + 63, PAGE_SIZE + 4 - 63);
+    n += stream_frame(f + n, 0, PAGE_SIZE + 8, true, data + PAGE_SIZE + 8, 13);
+    inject(&p, 1, f, n, false);
+    event(p.server, MIST_STREAM_OPEN);
+    empty(p.server);
+
+    n = stream_frame(f, 0, 0, false, data, PAGE_SIZE + 1);
+    inject(&p, 2, f, n, false);
+    mist_event e = event(p.server, MIST_STREAM_READABLE);
+    assert(e.length == PAGE_SIZE && !memcmp(e.data, data, e.length));
+    assert(mist_stream_consume(p.server, 0, e.length) == MIST_OK);
+    e = event(p.server, MIST_STREAM_READABLE);
+    assert(e.length == 4 && !memcmp(e.data, data + PAGE_SIZE, e.length));
+    assert(mist_stream_consume(p.server, 0, e.length) == MIST_OK);
+    empty(p.server);
+
+    n = stream_frame(f, 0, PAGE_SIZE + 4, false, data + PAGE_SIZE + 4, 17);
+    inject(&p, 3, f, n, false);
+    e = event(p.server, MIST_STREAM_READABLE);
+    assert(e.length == 17 && !memcmp(e.data, data + PAGE_SIZE + 4, e.length));
+    assert(mist_stream_consume(p.server, 0, e.length) == MIST_OK);
+    event(p.server, MIST_STREAM_FIN);
+
+    data[65] ^= 1;
+    n = stream_frame(f, 0, 0, false, data, 128);
+    inject(&p, 4, f, n, false);
+    assert(!replay_contains(p.server, 4));
+    expect_closing(&p, MIST_PROTOCOL_ERROR);
+    destroy(p);
+}
+
 static void flow_and_ack_violations(void)
 {
     mist_config cfg;
@@ -867,6 +906,7 @@ int main(void)
     handshake_replay_cache();
     authorization_policy();
     reordering_and_transaction();
+    receive_bitmap_boundaries();
     flow_and_ack_violations();
     messages_and_replay_window();
     pto_and_pacing();

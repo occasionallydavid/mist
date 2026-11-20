@@ -143,13 +143,12 @@ static int stage_bytes(transaction *tx, stream_update *u, uint64_t offset,
         uint64_t index = cur / PAGE_SIZE;
         const page *p = find_page(s->pages, index);
         unsigned at = (unsigned)(cur % PAGE_SIZE);
-        size_t count = (size_t)mist_min(end - cur, PAGE_SIZE - at);
+        unsigned count = (unsigned)mist_min(end - cur, PAGE_SIZE - at);
         if (p) {
-            for (size_t j = 0; j < count; ++j) {
-                if (page_has(p, at + (unsigned)j) &&
-                    p->data[at + j] != data[(size_t)(cur - offset) + j])
-                    return MIST_PROTOCOL_ERROR;
-            }
+            if (cur < s->rx_high &&
+                !page_matches(p, at, data + (size_t)(cur - offset),
+                              (unsigned)mist_min(count, s->rx_high - cur)))
+                return MIST_PROTOCOL_ERROR;
         } else if (!s->retired && cur + count > s->rx_read && !reserve_page(u, index)) {
             return MIST_RESOURCE_LIMIT;
         }

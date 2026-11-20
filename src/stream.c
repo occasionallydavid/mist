@@ -276,9 +276,39 @@ page *find_page(page *p, uint64_t index)
     return p;
 }
 
-bool page_has(const page *p, unsigned offset)
+/* Bitmap operations cover at most one word at a time. */
+static unsigned word_span(unsigned at, unsigned remaining)
 {
-    return p && ((p->present[offset / 64] >> (offset % 64)) & 1u);
+    return (unsigned)mist_min(64u - at % 64u, remaining);
+}
+
+static uint64_t low_mask(unsigned length)
+{
+    return UINT64_MAX >> (64u - length);
+}
+
+bool page_matches(const page *p, unsigned at, const uint8_t *data, unsigned n)
+{
+    while (n) {
+        unsigned count = word_span(at, n);
+        uint64_t mask = low_mask(count);
+        uint64_t overlap = (p->present[at / 64u] >> (at % 64u)) & mask;
+        if (overlap == mask) {
+            if (memcmp(p->data + at, data, count))
+                return false;
+        } else {
+            while (overlap) {
+                unsigned i = first_bit(overlap);
+                if (p->data[at + i] != data[i])
+                    return false;
+                overlap &= overlap - 1;
+            }
+        }
+        at += count;
+        data += count;
+        n -= count;
+    }
+    return true;
 }
 
 /* Sparse receive pages are indexed by an AVL tree. The peer controls the
@@ -384,12 +414,14 @@ void store_stream_bytes(stream *s, uint64_t offset, const uint8_t *data, size_t 
     while (n) {
         page *p = find_page(s->pages, offset / PAGE_SIZE);
         unsigned at = (unsigned)(offset % PAGE_SIZE);
-        size_t count = (size_t)mist_min(n, PAGE_SIZE - at);
-        for (size_t i = 0; i < count; ++i, ++at) {
-            if (!page_has(p, at)) {
-                p->data[at] = data[i];
-                p->present[at / 64] |= UINT64_C(1) << (at % 64);
-            }
+        unsigned count = (unsigned)mist_min(n, PAGE_SIZE - at);
+        /* The packet transaction already verified all overlapping bytes. */
+        memcpy(p->data + at, data, count);
+        unsigned end = at + count;
+        while (at < end) {
+            unsigned span = word_span(at, end - at);
+            p->present[at / 64u] |= low_mask(span) << (at % 64u);
+            at += span;
         }
         n -= count;
         data += count;
@@ -401,13 +433,20 @@ void advance_stream(stream *s)
 {
     while (s->rx_next < s->rx_high) {
         page *p = find_page(s->pages, s->rx_next / PAGE_SIZE);
-        unsigned at = (unsigned)(s->rx_next % PAGE_SIZE);
-        while (at < PAGE_SIZE && s->rx_next < s->rx_high && page_has(p, at)) {
-            ++at;
-            ++s->rx_next;
-        }
-        if (at < PAGE_SIZE)
+        if (!p)
             return;
+        unsigned at = (unsigned)(s->rx_next % PAGE_SIZE);
+        unsigned end = at + (unsigned)mist_min(s->rx_high - s->rx_next, PAGE_SIZE - at);
+        while (at < end) {
+            unsigned span = word_span(at, end - at);
+            uint64_t holes = (~p->present[at / 64u] >> (at % 64u)) & low_mask(span);
+            if (holes) {
+                s->rx_next += first_bit(holes);
+                return;
+            }
+            s->rx_next += span;
+            at += span;
+        }
     }
 }
 

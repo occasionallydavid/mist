@@ -257,7 +257,7 @@ void clean_streams(mist_conn *c);
 void writable_changed(mist_conn *c);
 bool stream_event(mist_conn *c, mist_event *e);
 page *find_page(page *head, uint64_t index);
-bool page_has(const page *p, unsigned offset);
+bool page_matches(const page *p, unsigned offset, const uint8_t *data, unsigned length);
 void commit_page(stream *s, page *p);
 void store_stream_bytes(stream *s, uint64_t offset, const uint8_t *data, size_t length);
 void advance_stream(stream *s);
