@@ -2,3 +2,5 @@
 /core/crash-*
 /core/leak-*
 /core/timeout-*
+/rust/target/
+/rust/Cargo.lock

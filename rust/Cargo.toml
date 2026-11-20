@@ -1,0 +1,34 @@
+[package]
+name = "mist"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+tokio = ["dep:getrandom", "dep:tokio", "tokio/net", "tokio/rt", "tokio/time"]
+toki = ["dep:getrandom", "dep:toki", "dep:tokio"]
+
+[dependencies]
+getrandom = { version = "0.4", optional = true }
+tokio = { version = "1", features = ["io-util", "macros", "sync"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+toki = { version = "0.1", default-features = false, optional = true }
+
+[[example]]
+name = "tokio_client"
+required-features = ["tokio"]
+
+[[example]]
+name = "tokio_server"
+required-features = ["tokio"]
+
+[[example]]
+name = "toki_client"
+required-features = ["toki"]
+
+[[example]]
+name = "toki_server"
+required-features = ["toki"]
