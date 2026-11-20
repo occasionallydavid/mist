@@ -14,6 +14,10 @@ make fuzz
 
 Link `build/libmist.a` and add `include/` to the include path. The public interface is in [include/mist.h](include/mist.h). The fuzz target requires Clang with libFuzzer. The ordinary library and test builds accept GCC or Clang.
 
+## Measure throughput
+
+Run `make bench` for a 64 MiB transfer or `make bench BENCH_MIB=256` to change the size. The benchmark measures verified stream payload delivered per second between two MIST endpoints in one process. It uses a lossless, zero-latency virtual link and excludes the handshake from wall-clock timing. The reported MIST datagram bytes include both directions.
+
 ## Drive a connection
 
 1. Create an initiator with `mist_client_create` using the responder's pinned X25519 public key. Create a responder with `mist_server_create` for an exact peer key or `mist_server_create_with_policy` for a caller-owned allowlist or authorization policy.

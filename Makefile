@@ -12,6 +12,7 @@ AR ?= ar
 FUZZ_CC ?= $(or $(shell command -v clang),$(shell command -v clang-19),clang)
 BUILD ?= build
 CFLAGS ?= -O2 -g
+BENCH_MIB ?= 64
 INCLUDES = -Iinclude -Isrc
 WARNINGS = -std=c11 -Wall -Wextra -Wpedantic -Werror
 SOURCES = src/mist.c src/handshake.c src/packet.c src/stream.c src/schedule.c \
@@ -20,7 +21,7 @@ HEADERS = include/mist.h src/internal.h src/crypto/crypto.h
 OBJECTS = $(SOURCES:%.c=$(BUILD)/%.o)
 TESTS = $(BUILD)/test_crypto $(BUILD)/test_transport
 
-.PHONY: all test clean sanitize fuzz
+.PHONY: all test clean sanitize fuzz bench
 all: $(BUILD)/libmist.a
 
 $(BUILD)/libmist.a: $(OBJECTS)
@@ -35,6 +36,12 @@ $(BUILD)/test_%: tests/test_%.c $(BUILD)/libmist.a $(HEADERS)
 
 test: $(TESTS)
 	@set -e; for test in $(TESTS); do "$$test"; done
+
+$(BUILD)/bench_throughput: bench/throughput.c $(BUILD)/libmist.a include/mist.h
+	$(CC) $(CPPFLAGS) $(INCLUDES) $(CFLAGS) $(WARNINGS) $(LTO) $(filter-out %.h,$^) $(LTO_LDFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+
+bench: $(BUILD)/bench_throughput
+	$(BUILD)/bench_throughput $(BENCH_MIB)
 
 sanitize:
 	$(MAKE) test BUILD=$(BUILD)/sanitize LTO= \
