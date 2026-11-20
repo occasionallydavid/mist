@@ -209,9 +209,6 @@ static void expect_closing(pair *p, uint16_t code)
     poll_at(p->server, p->now += 1000000);
     e = event(p->server, MIST_CLOSED);
     assert(!e.remote && e.close_code == code);
-    uint8_t zero[32] = {0};
-    assert(!memcmp(p->server->send_key, zero, 32));
-    assert(!memcmp(p->server->recv_key, zero, 32));
 }
 
 static void reordering_and_transaction(void)

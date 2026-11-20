@@ -69,8 +69,6 @@ static void compress(uint32_t h[8], const uint8_t block[64], uint64_t count,
     }
     for (unsigned i = 0; i < 8; ++i)
         h[i] ^= v[i] ^ v[i + 8];
-    mist_wipe(m, sizeof m);
-    mist_wipe(v, sizeof v);
 }
 
 void mist_blake2s(uint8_t out[32], const uint8_t *in, size_t n)
@@ -90,6 +88,4 @@ void mist_blake2s(uint8_t out[32], const uint8_t *in, size_t n)
     compress(h, last, count, 1);
     for (unsigned i = 0; i < 32; ++i)
         out[i] = (uint8_t)(h[i / 4] >> (8 * (i % 4)));
-    mist_wipe(last, sizeof last);
-    mist_wipe(h, sizeof h);
 }

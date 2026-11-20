@@ -17,8 +17,6 @@ static void hmac(uint8_t out[32], const uint8_t key[32],
         memcpy(inner + 64, input, n);
     mist_blake2s(outer + 64, inner, 64 + n);
     mist_blake2s(out, outer, sizeof outer);
-    mist_wipe(inner, sizeof inner);
-    mist_wipe(outer, sizeof outer);
 }
 
 static void hkdf(uint8_t a[32], uint8_t b[32], const uint8_t chain[32],
@@ -30,8 +28,6 @@ static void hkdf(uint8_t a[32], uint8_t b[32], const uint8_t chain[32],
     memcpy(a, block, 32);
     block[32] = 2;
     hmac(b, temp, block, sizeof block);
-    mist_wipe(temp, sizeof temp);
-    mist_wipe(block, sizeof block);
 }
 
 static void mix_hash(mist_noise *s, const uint8_t *data, size_t n)
@@ -40,7 +36,6 @@ static void mix_hash(mist_noise *s, const uint8_t *data, size_t n)
     memcpy(joined, s->hash, 32);
     memcpy(joined + 32, data, n);
     mist_blake2s(s->hash, joined, 32 + n);
-    mist_wipe(joined, sizeof joined);
 }
 
 static void initialize(mist_noise *s, const uint8_t cid[16],
@@ -66,7 +61,6 @@ static int mix_dh(mist_noise *s, const uint8_t secret[32], const uint8_t peer[32
         hkdf(s->chain, s->key, s->chain, dh, sizeof dh);
         s->nonce = 0;
     }
-    mist_wipe(dh, sizeof dh);
     return valid;
 }
 

@@ -29,24 +29,12 @@ void insert_stream(mist_conn *c, stream *s)
     slot_set_update(&sc->active, slot, true);
 }
 
-static void free_chunk(chunk *item)
-{
-    mist_wipe(item->data, item->length);
-    free(item);
-}
-
-static void free_page(page *p)
-{
-    mist_wipe(p->data, sizeof p->data);
-    free(p);
-}
-
 static void free_pages(page *p)
 {
     if (p) {
         free_pages(p->left);
         free_pages(p->right);
-        free_page(p);
+        free(p);
     }
 }
 
@@ -58,12 +46,9 @@ void free_stream(stream *s)
     while (s->head) {
         chunk *item = s->head;
         s->head = item->next;
-        free_chunk(item);
+        free(item);
     }
-    if (s->message)
-        mist_wipe(s->message, (size_t)s->rx_final);
     free(s->message);
-    mist_wipe(s->message_digest, sizeof s->message_digest);
     free(s);
 }
 
@@ -71,7 +56,6 @@ void clean_streams(mist_conn *c)
 {
     for (unsigned k = 0; k < 4; ++k) {
         stream_class *sc = &c->classes[k];
-        mist_wipe(sc->recent, sizeof sc->recent);
         if (sc->slots) {
             for (uint32_t i = 0; i < sc->capacity; ++i)
                 free_stream(sc->slots[i]);
@@ -384,7 +368,7 @@ static page *remove_first_page(page *root)
         return balance(root);
     }
     page *right = root->right;
-    free_page(root);
+    free(root);
     return right;
 }
 
@@ -531,8 +515,6 @@ int mist_message_consume(mist_conn *c, uint32_t id)
         return MIST_INVALID;
     consume_credit(c, (size_t)s->rx_final);
     mist_blake2s(s->message_digest, s->message, (size_t)s->rx_final);
-    if (s->message)
-        mist_wipe(s->message, (size_t)s->rx_final);
     free(s->message);
     s->message = NULL;
     s->retired = true;

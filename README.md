@@ -36,6 +36,7 @@ A responder object represents one connection slot. A UDP listener should bound t
 - Each outgoing class has 1,024 stream slots. Incoming slots are sized by the advertised stream allowance. Stream-count credit advances as completed stream ordinals become contiguous. Messages can be delivered and consumed out of order while waiting for earlier ordinals to retire.
 - The receiver checks overlapping bytes that it still retains and recent retired message digests and final offsets. Older retransmissions below the consumption or completion watermark cannot modify receive state or produce events. Exact byte comparison for arbitrarily old released stream data would require unbounded history.
 - Session replacement is signaled one minute before the 24-hour limit or 1,024 packets before the packet-number limit. The idle timeout is 60 seconds.
+- Plaintext, session keys, and cryptographic intermediates can remain in process memory until overwritten.
 
 ## Cryptography and tests
 

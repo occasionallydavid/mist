@@ -58,8 +58,6 @@
 #define FOR(i, start, end)         FOR_T(size_t, i, start, end)
 #define COPY(dst, src, size)       FOR(_i_, 0, size) (dst)[_i_] = (src)[_i_]
 #define ZERO(buf, size)            FOR(_i_, 0, size) (buf)[_i_] = 0
-#define WIPE_CTX(ctx)              mist_wipe(ctx   , sizeof(*(ctx)))
-#define WIPE_BUFFER(buffer)        mist_wipe(buffer, sizeof(buffer))
 #define MIN(a, b)                  ((a) <= (b) ? (a) : (b))
 typedef uint8_t  u8;
 typedef uint32_t u32;
@@ -198,12 +196,9 @@ static u64 crypto_chacha20_djb(u8 *cipher_text, const u8 *plain_text,
 		FOR (i, 0, text_size) {
 			cipher_text[i] = tmp[i] ^ plain_text[i];
 		}
-		WIPE_BUFFER(tmp);
 	}
 	ctr = input[12] + ((u64)input[13] << 32) + (text_size > 0);
 
-	WIPE_BUFFER(pool);
-	WIPE_BUFFER(input);
 	return ctr;
 }
 
@@ -366,7 +361,6 @@ static void crypto_poly1305_final(crypto_poly1305_ctx *ctx, u8 mac[16])
 		store32_le(mac + i*4, (u32)c);
 		c = c >> 32;
 	}
-	WIPE_CTX(ctx);
 }
 
 ////////////////////////////////
@@ -376,17 +370,17 @@ static void lock_auth(u8 mac[16], const u8  auth_key[32],
                       const u8 *ad         , size_t ad_size,
                       const u8 *cipher_text, size_t text_size)
 {
-	u8 sizes[16]; // Not secret, not wiped
+	u8 sizes[16];
 	store64_le(sizes + 0, ad_size);
 	store64_le(sizes + 8, text_size);
-	crypto_poly1305_ctx poly_ctx;           // auto wiped...
+	crypto_poly1305_ctx poly_ctx;
 	crypto_poly1305_init  (&poly_ctx, auth_key);
 	crypto_poly1305_update(&poly_ctx, ad         , ad_size);
 	crypto_poly1305_update(&poly_ctx, zero       , gap(ad_size, 16));
 	crypto_poly1305_update(&poly_ctx, cipher_text, text_size);
 	crypto_poly1305_update(&poly_ctx, zero       , gap(text_size, 16));
 	crypto_poly1305_update(&poly_ctx, sizes      , 16);
-	crypto_poly1305_final (&poly_ctx, mac); // ...here
+	crypto_poly1305_final (&poly_ctx, mac);
 }
 
 ////////////////////////////////////
@@ -626,8 +620,6 @@ static void fe_tobytes(u8 s[32], const fe h)
 	store32_le(s + 20, ((u32)t[6] >>  7) | ((u32)t[7] << 19));
 	store32_le(s + 24, ((u32)t[7] >> 13) | ((u32)t[8] << 12));
 	store32_le(s + 28, ((u32)t[8] >> 20) | ((u32)t[9] <<  6));
-
-	WIPE_BUFFER(t);
 }
 
 // Precondition
@@ -787,9 +779,6 @@ static void fe_invert(fe out, const fe x)
 	fe_sq(t0, t0);
 	fe_sq(t0, t0);
 	fe_mul(out, t0, t1);
-	WIPE_BUFFER(t0);
-	WIPE_BUFFER(t1);
-	WIPE_BUFFER(t2);
 }
 
 // trim a scalar for scalar multiplication
@@ -864,10 +853,6 @@ static void scalarmult(u8 q[32], const u8 scalar[32], const u8 p[32],
 	fe_invert(z2, z2);
 	fe_mul(x2, x2, z2);
 	fe_tobytes(q, x2);
-
-	WIPE_BUFFER(x1);
-	WIPE_BUFFER(x2);  WIPE_BUFFER(z2);  WIPE_BUFFER(t0);
-	WIPE_BUFFER(x3);  WIPE_BUFFER(z3);  WIPE_BUFFER(t1);
 }
 
 static void x25519_raw(u8       raw_shared_secret[32],
@@ -878,7 +863,6 @@ static void x25519_raw(u8       raw_shared_secret[32],
 	u8 e[32];
 	trim_scalar(e, your_secret_key);
 	scalarmult(raw_shared_secret, e, their_public_key, 255);
-	WIPE_BUFFER(e);
 }
 
 void mist_x25519_public(u8       public_key[32],
@@ -886,13 +870,6 @@ void mist_x25519_public(u8       public_key[32],
 {
 	static const u8 base_point[32] = {9};
 	x25519_raw(public_key, secret_key, base_point);
-}
-
-void mist_wipe(void *secret, size_t size)
-{
-    volatile uint8_t *p = secret;
-    while (size-- != 0)
-        *p++ = 0;
 }
 
 int mist_equal(const uint8_t *a, const uint8_t *b, size_t n)
@@ -923,7 +900,6 @@ void mist_aead_seal(uint8_t *out, const uint8_t *in, size_t n,
     crypto_chacha20_ietf(poly_key, NULL, sizeof poly_key, key, nonce, 0);
     crypto_chacha20_ietf(out, in, n, key, nonce, 1);
     lock_auth(out + n, poly_key, ad, ad_len, out, n);
-    mist_wipe(poly_key, sizeof poly_key);
 }
 
 int mist_aead_open(uint8_t *out, const uint8_t *in, size_t n,
@@ -934,8 +910,6 @@ int mist_aead_open(uint8_t *out, const uint8_t *in, size_t n,
     crypto_chacha20_ietf(poly_key, NULL, sizeof poly_key, key, nonce, 0);
     lock_auth(tag, poly_key, ad, ad_len, in, n);
     int valid = mist_equal(tag, in + n, sizeof tag);
-    mist_wipe(poly_key, sizeof poly_key);
-    mist_wipe(tag, sizeof tag);
     if (valid)
         crypto_chacha20_ietf(out, in, n, key, nonce, 1);
     return valid;

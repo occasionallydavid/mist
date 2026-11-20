@@ -62,10 +62,7 @@ static void discard(transaction *tx)
             u->reserved = p->next;
             free(p);
         }
-        if (u->message) {
-            mist_wipe(u->message, (size_t)u->final);
-            free(u->message);
-        }
+        free(u->message);
         if (u->is_new)
             free_stream(u->s);
     }
@@ -165,7 +162,6 @@ static int compare_message_digest(const uint8_t digest[32],
     uint8_t hash[32];
     mist_blake2s(hash, data, n);
     bool equal = mist_equal(digest, hash, sizeof hash) != 0;
-    mist_wipe(hash, sizeof hash);
     return equal ? 0 : MIST_PROTOCOL_ERROR;
 }
 
@@ -423,7 +419,6 @@ void data_input(mist_conn *c, const uint8_t *packet, size_t n)
         c->last_rx = c->now;
         accept_plaintext(c, number, plaintext, length);
     }
-    mist_wipe(plaintext, length);
 }
 
 static void emit_data(mist_conn *c, const uint8_t *plaintext, size_t n,
@@ -511,8 +506,6 @@ void data_poll(mist_conn *c)
             c->ack_at = NEVER;
         }
     }
-    if (length) {
+    if (length)
         emit_data(c, plaintext, length, ref, probe);
-        mist_wipe(plaintext, length);
-    }
 }

@@ -97,7 +97,6 @@ void mist_destroy(mist_conn *c)
     if (!c)
         return;
     clean_streams(c);
-    mist_wipe(c, sizeof *c);
     free(c);
 }
 
@@ -135,11 +134,6 @@ static void discard_application_state(mist_conn *c)
 void terminate(mist_conn *c, uint16_t code, bool remote)
 {
     discard_application_state(c);
-    mist_wipe(c->local_key, sizeof c->local_key);
-    mist_wipe(c->randomness, sizeof c->randomness);
-    mist_wipe(c->send_key, sizeof c->send_key);
-    mist_wipe(c->recv_key, sizeof c->recv_key);
-    mist_wipe(&c->noise, sizeof c->noise);
     c->close_code = code;
     c->remote_close = remote;
     c->state = CLOSED;

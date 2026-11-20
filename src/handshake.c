@@ -88,8 +88,6 @@ static void install_keys(mist_conn *c, const uint8_t send[32], const uint8_t rec
 {
     memcpy(c->send_key, send, 32);
     memcpy(c->recv_key, recv, 32);
-    mist_wipe(c->local_key, sizeof c->local_key);
-    mist_wipe(&c->noise, sizeof c->noise);
     c->last_rx = c->now;
     c->expire_at = mist_add(c->now, SESSION_TIME);
     c->reconnect_at = mist_add(c->now, RECONNECT_TIME);
@@ -127,8 +125,6 @@ static void accept_init(mist_conn *c, const uint8_t *packet)
         c->random_event = true;
         c->handshake_at = mist_add(c->now, TENTATIVE_TIME);
     }
-    mist_wipe(&noise, sizeof noise);
-    mist_wipe(payload, sizeof payload);
 }
 
 static void accept_resp(mist_conn *c, const uint8_t *packet)
@@ -144,10 +140,6 @@ static void accept_resp(mist_conn *c, const uint8_t *packet)
         c->first_data = true;
         establish(c);
     }
-    mist_wipe(&noise, sizeof noise);
-    mist_wipe(k1, sizeof k1);
-    mist_wipe(k2, sizeof k2);
-    mist_wipe(payload, sizeof payload);
 }
 
 void handshake_input(mist_conn *c, const uint8_t *packet, size_t length)
@@ -177,7 +169,6 @@ static void send_init(mist_conn *c)
     packet_header(c->init, PACKET_INIT, c->cid);
     bool ok = mist_noise_write_init(&c->noise, c->init + COMMON_HEADER, c->cid,
                                    c->local_key, c->peer_key, c->randomness + 16, payload);
-    mist_wipe(c->randomness, sizeof c->randomness);
     c->random_length = 0;
     if (!ok) {
         terminate(c, MIST_PROTOCOL_ERROR, false);
@@ -195,7 +186,6 @@ static void send_resp(mist_conn *c)
     packet_header(c->resp, PACKET_RESP, c->cid);
     bool ok = mist_noise_write_resp(&c->noise, c->resp + COMMON_HEADER,
                                    c->randomness, payload, k1, k2);
-    mist_wipe(c->randomness, sizeof c->randomness);
     c->random_length = 0;
     if (ok) {
         install_keys(c, k2, k1);
@@ -204,8 +194,6 @@ static void send_resp(mist_conn *c)
     } else {
         terminate(c, MIST_PROTOCOL_ERROR, false);
     }
-    mist_wipe(k1, sizeof k1);
-    mist_wipe(k2, sizeof k2);
 }
 
 void handshake_poll(mist_conn *c)

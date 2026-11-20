@@ -257,7 +257,6 @@ void frame_acked(mist_conn *c, frame_ref ref)
         }
         c->send_used -= item->length;
         --c->chunks;
-        mist_wipe(item->data, item->length);
         free(item);
     } else {
         credit *cr = get_credit(c, ref);

@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-void mist_wipe(void *p, size_t n);
 int mist_equal(const uint8_t *a, const uint8_t *b, size_t n);
 void mist_x25519_public(uint8_t out[32], const uint8_t secret[32]);
 int mist_x25519(uint8_t out[32], const uint8_t secret[32], const uint8_t peer[32]);
