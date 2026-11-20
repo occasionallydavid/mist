@@ -1,0 +1,4 @@
+/build/
+/crash-*
+/leak-*
+/timeout-*
