@@ -78,6 +78,36 @@ static void aead(void)
         assert(output[i] == 0xab);
 }
 
+static void aead_packet_sizes(void)
+{
+    static const size_t sizes[] = {
+        0, 1, 15, 16, 31, 32, 63, 64, 65, 127, 128, 129, 191, 192, 193,
+        255, 256, 257, 511, 512, 513, 1024, 1138, 1154
+    };
+    uint8_t key[32], ad[30], nonce[12] = {9, 0, 201, 77, 1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t data[1154], box[sizeof data + 16], digest[32];
+    uint8_t hashes[(sizeof sizes / sizeof sizes[0]) * 32];
+    for (unsigned i = 0; i < sizeof key; ++i)
+        key[i] = (uint8_t)(i * 3u + 17);
+    for (unsigned i = 0; i < sizeof ad; ++i)
+        ad[i] = (uint8_t)(i * 11u + 5);
+    for (unsigned i = 0; i < sizeof data; ++i)
+        data[i] = (uint8_t)(i * 37u + (i >> 4));
+
+    for (unsigned i = 0; i < sizeof sizes / sizeof sizes[0]; ++i) {
+        size_t n = sizes[i];
+        nonce[1] = (uint8_t)i;
+        memcpy(box, data, n);
+        mist_aead_seal(box, box, n, ad, sizeof ad, key, nonce);
+        mist_blake2s(hashes + i * 32, box, n + 16);
+        assert(mist_aead_open(box, box, n, ad, sizeof ad, key, nonce));
+        assert(!memcmp(box, data, n));
+    }
+    /* Aggregate of ciphertext and tag vectors from Python cryptography. */
+    mist_blake2s(digest, hashes, sizeof hashes);
+    expect(digest, sizeof digest, "394c010739add41c15ad7ce47f0ac62803c9c2bfae7e28374f5503c4189960c5");
+}
+
 static void blake2s(void)
 {
     uint8_t data[255], out[32];
@@ -138,6 +168,7 @@ int main(void)
 {
     x25519();
     aead();
+    aead_packet_sizes();
     blake2s();
     noise();
     puts("crypto vectors passed");

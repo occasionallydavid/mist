@@ -18,6 +18,10 @@ Link `build/libmist.a` and add `include/` to the include path. The public interf
 
 Run `make bench` for a 64 MiB transfer or `make bench BENCH_MIB=256` to change the size. The benchmark measures verified stream payload delivered per second between two MIST endpoints in one process. It uses a lossless, zero-latency virtual link and excludes the handshake from wall-clock timing. The reported MIST datagram bytes include both directions.
 
+## SIMD128 build
+
+ChaCha20 uses 128-bit compiler vectors in every build. Build with GCC 12 or newer, or Clang. When targeting WebAssembly, compile with `-msimd128`. The resulting module uses standard Wasm SIMD128 instructions, and wasm2c uses [SIMDe headers](https://github.com/simd-everywhere/simde) when compiling the translated C. [WABT SIMD support](https://github.com/WebAssembly/wabt#supported-proposals)
+
 ## Drive a connection
 
 1. Create an initiator with `mist_client_create` using the responder's pinned X25519 public key. Create a responder with `mist_server_create` for an exact peer key or `mist_server_create_with_policy` for a caller-owned allowlist or authorization policy.

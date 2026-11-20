@@ -54,6 +54,12 @@
 // Extracted from Monocypher 4.0.3. See README.md for provenance.
 #include "crypto.h"
 
+#include <stdbool.h>
+
+#if defined(__wasm__) && !defined(__wasm_simd128__)
+#error "MIST requires -msimd128 for WebAssembly"
+#endif
+
 #define FOR_T(type, i, start, end) for (type i = (start); i < (end); i++)
 #define FOR(i, start, end)         FOR_T(size_t, i, start, end)
 #define COPY(dst, src, size)       FOR(_i_, 0, size) (dst)[_i_] = (src)[_i_]
@@ -110,106 +116,138 @@ static void store64_le(u8 out[8], u64 in)
 static void load32_le_buf (u32 *dst, const u8 *src, size_t size) {
 	FOR(i, 0, size) { dst[i] = load32_le(src + i*4); }
 }
-static u32 rotl32(u32 x, u32 n) { return (x << n) ^ (x >> (32 - n)); }
 /////////////////
 /// Chacha 20 ///
 /////////////////
-#define QUARTERROUND(a, b, c, d)	\
-	a += b;  d = rotl32(d ^ a, 16); \
-	c += d;  b = rotl32(b ^ c, 12); \
-	a += b;  d = rotl32(d ^ a,  8); \
-	c += d;  b = rotl32(b ^ c,  7)
+typedef u32 chacha_vec __attribute__((vector_size(16)));
 
-static void chacha20_rounds(u32 out[16], const u32 in[16])
+#define VSHUFFLE(x, a, b, c, d) __builtin_shufflevector(x, x, a, b, c, d)
+
+static inline chacha_vec chacha20_rotl(chacha_vec x, unsigned n)
 {
-	// The temporary variables make Chacha20 10% faster.
-	u32 t0  = in[ 0];  u32 t1  = in[ 1];  u32 t2  = in[ 2];  u32 t3  = in[ 3];
-	u32 t4  = in[ 4];  u32 t5  = in[ 5];  u32 t6  = in[ 6];  u32 t7  = in[ 7];
-	u32 t8  = in[ 8];  u32 t9  = in[ 9];  u32 t10 = in[10];  u32 t11 = in[11];
-	u32 t12 = in[12];  u32 t13 = in[13];  u32 t14 = in[14];  u32 t15 = in[15];
-
-	FOR (i, 0, 10) { // 20 rounds, 2 rounds per loop.
-		QUARTERROUND(t0, t4, t8 , t12); // column 0
-		QUARTERROUND(t1, t5, t9 , t13); // column 1
-		QUARTERROUND(t2, t6, t10, t14); // column 2
-		QUARTERROUND(t3, t7, t11, t15); // column 3
-		QUARTERROUND(t0, t5, t10, t15); // diagonal 0
-		QUARTERROUND(t1, t6, t11, t12); // diagonal 1
-		QUARTERROUND(t2, t7, t8 , t13); // diagonal 2
-		QUARTERROUND(t3, t4, t9 , t14); // diagonal 3
-	}
-	out[ 0] = t0;   out[ 1] = t1;   out[ 2] = t2;   out[ 3] = t3;
-	out[ 4] = t4;   out[ 5] = t5;   out[ 6] = t6;   out[ 7] = t7;
-	out[ 8] = t8;   out[ 9] = t9;   out[10] = t10;  out[11] = t11;
-	out[12] = t12;  out[13] = t13;  out[14] = t14;  out[15] = t15;
+    return (x << n) | (x >> (32 - n));
 }
 
-static const u8 *chacha20_constant = (const u8*)"expand 32-byte k"; // 16 bytes
-
-static u64 crypto_chacha20_djb(u8 *cipher_text, const u8 *plain_text,
-                        size_t text_size, const u8 key[32], const u8 nonce[8],
-                        u64 ctr)
+static inline void chacha20_quarter(chacha_vec *a, chacha_vec *b,
+                                    chacha_vec *c, chacha_vec *d)
 {
-	u32 input[16];
-	load32_le_buf(input     , chacha20_constant, 4);
-	load32_le_buf(input +  4, key              , 8);
-	load32_le_buf(input + 14, nonce            , 2);
-	input[12] = (u32) ctr;
-	input[13] = (u32)(ctr >> 32);
-
-	// Whole blocks
-	u32    pool[16];
-	size_t nb_blocks = text_size >> 6;
-	FOR (i, 0, nb_blocks) {
-		chacha20_rounds(pool, input);
-		if (plain_text != NULL) {
-			FOR (j, 0, 16) {
-				u32 p = pool[j] + input[j];
-				store32_le(cipher_text, p ^ load32_le(plain_text));
-				cipher_text += 4;
-				plain_text  += 4;
-			}
-		} else {
-			FOR (j, 0, 16) {
-				u32 p = pool[j] + input[j];
-				store32_le(cipher_text, p);
-				cipher_text += 4;
-			}
-		}
-		input[12]++;
-		if (input[12] == 0) {
-			input[13]++;
-		}
-	}
-	text_size &= 63;
-
-	// Last (incomplete) block
-	if (text_size > 0) {
-		if (plain_text == NULL) {
-			plain_text = zero;
-		}
-		chacha20_rounds(pool, input);
-		u8 tmp[64];
-		FOR (i, 0, 16) {
-			store32_le(tmp + i*4, pool[i] + input[i]);
-		}
-		FOR (i, 0, text_size) {
-			cipher_text[i] = tmp[i] ^ plain_text[i];
-		}
-	}
-	ctr = input[12] + ((u64)input[13] << 32) + (text_size > 0);
-
-	return ctr;
+    *a += *b;
+    *d = chacha20_rotl(*d ^ *a, 16);
+    *c += *d;
+    *b = chacha20_rotl(*b ^ *c, 12);
+    *a += *b;
+    *d = chacha20_rotl(*d ^ *a, 8);
+    *c += *d;
+    *b = chacha20_rotl(*b ^ *c, 7);
 }
 
-static u32 crypto_chacha20_ietf(u8 *cipher_text, const u8 *plain_text,
-                         size_t text_size,
-                         const u8 key[32], const u8 nonce[12], u32 ctr)
+typedef struct {
+    chacha_vec a, b, c, d;
+} chacha20_rows;
+
+static inline void chacha20_permute(chacha20_rows *s, bool diagonal)
 {
-	u64 big_ctr = ctr + ((u64)load32_le(nonce) << 32);
-	return (u32)crypto_chacha20_djb(cipher_text, plain_text, text_size,
-	                                key, nonce + 4, big_ctr);
+    s->b = diagonal ? VSHUFFLE(s->b, 1, 2, 3, 0) : VSHUFFLE(s->b, 3, 0, 1, 2);
+    s->c = VSHUFFLE(s->c, 2, 3, 0, 1);
+    s->d = diagonal ? VSHUFFLE(s->d, 3, 0, 1, 2) : VSHUFFLE(s->d, 1, 2, 3, 0);
 }
+
+static inline chacha_vec load_vector(const u32 words[4])
+{
+    chacha_vec v;
+    __builtin_memcpy(&v, words, sizeof v);
+    return v;
+}
+
+static inline void chacha20_store(u8 out[16], const u8 text[16], chacha_vec block)
+{
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    chacha_vec v;
+    __builtin_memcpy(&v, text, sizeof v);
+    v ^= block;
+    __builtin_memcpy(out, &v, sizeof v);
+#else
+    for (unsigned i = 0; i < 4; ++i)
+        store32_le(out + i * 4, block[i] ^ load32_le(text + i * 4));
+#endif
+}
+
+static inline void chacha20_vectors(u8 *out, const u8 *text, const u32 input[16], bool two)
+{
+    chacha20_rows initial = {
+        load_vector(input), load_vector(input + 4),
+        load_vector(input + 8), load_vector(input + 12)
+    };
+    chacha20_rows next = initial;
+    if (two)
+        next.d += (chacha_vec){1, 0, 0, 0};
+    chacha20_rows s = initial, t = next;
+
+    /* Each lane runs one column. Shift rows to run the diagonal round.
+     * Interleave two independent counters when both blocks are available. */
+    for (unsigned i = 0; i < 10; ++i) {
+        chacha20_quarter(&s.a, &s.b, &s.c, &s.d);
+        if (two)
+            chacha20_quarter(&t.a, &t.b, &t.c, &t.d);
+        chacha20_permute(&s, true);
+        if (two)
+            chacha20_permute(&t, true);
+        chacha20_quarter(&s.a, &s.b, &s.c, &s.d);
+        if (two)
+            chacha20_quarter(&t.a, &t.b, &t.c, &t.d);
+        chacha20_permute(&s, false);
+        if (two)
+            chacha20_permute(&t, false);
+    }
+    chacha20_store(out,      text,      s.a + initial.a);
+    chacha20_store(out + 16, text + 16, s.b + initial.b);
+    chacha20_store(out + 32, text + 32, s.c + initial.c);
+    chacha20_store(out + 48, text + 48, s.d + initial.d);
+    if (two) {
+        chacha20_store(out + 64,  text + 64,  t.a + next.a);
+        chacha20_store(out + 80,  text + 80,  t.b + next.b);
+        chacha20_store(out + 96,  text + 96,  t.c + next.c);
+        chacha20_store(out + 112, text + 112, t.d + next.d);
+    }
+}
+
+#undef VSHUFFLE
+
+static void crypto_chacha20_ietf(u8 *out, const u8 *text, size_t size,
+                               const u8 key[32], const u8 nonce[12], u32 counter)
+{
+    static const u8 constant[16] = "expand 32-byte k";
+    u32 input[16];
+    load32_le_buf(input, constant, 4);
+    load32_le_buf(input + 4, key, 8);
+    input[12] = counter;
+    load32_le_buf(input + 13, nonce, 3);
+
+    while (text && size >= 128) {
+        chacha20_vectors(out, text, input, true);
+        input[12] += 2;
+        out += 128;
+        text += 128;
+        size -= 128;
+    }
+    while (size >= 64) {
+        chacha20_vectors(out, text ? text : zero, input, false);
+        ++input[12];
+        out += 64;
+        if (text)
+            text += 64;
+        size -= 64;
+    }
+    if (size) {
+        u8 block[64];
+        chacha20_vectors(block, zero, input, false);
+        if (!text)
+            text = zero;
+        for (size_t i = 0; i < size; ++i)
+            out[i] = block[i] ^ text[i];
+    }
+}
+
 // Incremental interface
 typedef struct {
 	// Do not rely on the size or contents of this type,
