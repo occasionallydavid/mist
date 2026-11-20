@@ -15,6 +15,7 @@ static uint64_t pto_interval(const mist_conn *c)
 static void remove_flight(mist_conn *c, sent_packet *p)
 {
     p->outstanding = false;
+    slot_set_update(&c->sent_flight, (unsigned)(p - c->sent), false);
     --c->flight_packets;
     c->stats.bytes_in_flight -= p->size;
     if (!c->flight_packets)
@@ -98,10 +99,9 @@ void process_acks(mist_conn *c, const ack_frame *acks, size_t count)
     }
     bool progress = false, sample = false;
     uint64_t sample_number = 0, rtt = 0, delay = 0;
-    for (unsigned i = 0; i < TX_HISTORY; ++i) {
+    for (unsigned i = slot_at_or_after(&c->sent_valid, 0); i != NO_SLOT;
+         i = slot_at_or_after(&c->sent_valid, i + 1)) {
         sent_packet *p = &c->sent[i];
-        if (!p->valid)
-            continue;
         const ack_frame *ack = matching_ack(acks, count, p->number);
         if (!ack)
             continue;
@@ -117,7 +117,7 @@ void process_acks(mist_conn *c, const ack_frame *acks, size_t count)
         }
         progress = true;
         frame_acked(c, p->ref);
-        p->valid = false;
+        slot_set_update(&c->sent_valid, i, false);
     }
     if (sample)
         note_rtt(c, rtt, delay);
@@ -135,39 +135,56 @@ static uint64_t loss_delay(const mist_conn *c)
     return mist_max(1000, rtt + rtt / 8);
 }
 
+/* The ring is written in increasing packet-number and timestamp order. */
+static unsigned oldest_before_ack(const mist_conn *c)
+{
+    if (c->largest_acked_valid && c->flight_packets) {
+        unsigned slot = flight_slot_at_or_after(c, c->sent_cursor);
+        if (c->sent[slot].number < c->largest_acked)
+            return slot;
+    }
+    return NO_SLOT;
+}
+
 uint64_t loss_deadline(const mist_conn *c)
 {
-    if (!c->largest_acked_valid)
-        return NEVER;
-    uint64_t delay = loss_delay(c), next = NEVER;
-    for (unsigned i = 0; i < TX_HISTORY; ++i) {
-        const sent_packet *p = &c->sent[i];
-        if (p->outstanding && p->number < c->largest_acked)
-            next = mist_min(next, mist_add(p->time, delay));
-    }
-    return next;
+    unsigned slot = oldest_before_ack(c);
+    return slot == NO_SLOT ? NEVER : mist_add(c->sent[slot].time, loss_delay(c));
 }
 
 void detect_loss(mist_conn *c)
 {
-    if (!c->largest_acked_valid)
+    unsigned slot = oldest_before_ack(c);
+    if (slot == NO_SLOT)
         return;
     uint64_t delay = loss_delay(c);
-    for (unsigned i = 0; i < TX_HISTORY; ++i) {
-        sent_packet *p = &c->sent[i];
-        if (p->outstanding && p->number < c->largest_acked &&
-            (c->largest_acked - p->number >= 3 || c->now - p->time >= delay))
-            mark_lost(c, p);
+    do {
+        sent_packet *p = &c->sent[slot];
+        if (c->largest_acked - p->number < 3 && c->now - p->time < delay)
+            break;
+        mark_lost(c, p);
+        slot = oldest_before_ack(c);
+    } while (slot != NO_SLOT);
+}
+
+void make_probe_room(mist_conn *c)
+{
+    if (c->flight_packets >= MAX_FLIGHT_PACKETS) {
+        unsigned slot = flight_slot_at_or_after(c, c->sent_cursor);
+        mark_lost(c, &c->sent[slot]);
     }
 }
 
 void record_sent(mist_conn *c, size_t size, frame_ref ref, bool probe)
 {
-    sent_packet *p = &c->sent[c->sent_cursor];
+    unsigned slot = c->sent_cursor;
+    sent_packet *p = &c->sent[slot];
     if (p->outstanding)
         mark_lost(c, p);
-    c->sent_cursor = (c->sent_cursor + 1) % TX_HISTORY;
-    *p = (sent_packet){c->tx_number, c->now, ref, (uint16_t)size, true, true};
+    c->sent_cursor = (slot + 1) % TX_HISTORY;
+    *p = (sent_packet){c->tx_number, c->now, ref, (uint16_t)size, true};
+    slot_set_update(&c->sent_valid, slot, true);
+    slot_set_update(&c->sent_flight, slot, true);
     ++c->flight_packets;
     c->stats.bytes_in_flight += size;
     if (probe) {
@@ -180,18 +197,4 @@ void record_sent(mist_conn *c, size_t size, frame_ref ref, bool probe)
     uint64_t rtt = c->rtt_valid ? c->stats.smoothed_rtt_us : 100000;
     uint64_t spacing = size * rtt / c->stats.cwnd;
     c->pace_at = mist_add(c->now, mist_max(1, spacing));
-}
-
-void make_probe_room(mist_conn *c)
-{
-    if (c->flight_packets < MAX_FLIGHT_PACKETS)
-        return;
-    sent_packet *oldest = NULL;
-    for (unsigned i = 0; i < TX_HISTORY; ++i) {
-        sent_packet *p = &c->sent[i];
-        if (p->outstanding && (!oldest || p->number < oldest->number))
-            oldest = p;
-    }
-    if (oldest)
-        mark_lost(c, oldest);
 }

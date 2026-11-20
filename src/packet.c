@@ -2,7 +2,7 @@
 
 #define MAX_PACKET_STREAMS (MAX_PLAINTEXT / 13)
 #define MAX_PACKET_FRAGMENTS (MAX_PLAINTEXT / STREAM_HEADER)
-#define MAX_PACKET_ACKS (MAX_PLAINTEXT / 30)
+#define MAX_PACKET_ACKS (MAX_PLAINTEXT / ACK_MIN_SIZE)
 
 uint64_t read_be(const uint8_t *p, unsigned n)
 {
@@ -269,7 +269,7 @@ static int parse_frames(mist_conn *c, transaction *tx, const uint8_t *in, size_t
             size = 1;
             break;
         case FRAME_ACK: {
-            if (n < 30)
+            if (n < ACK_MIN_SIZE)
                 return MIST_PROTOCOL_ERROR;
             ack_frame *ack = &tx->acks[tx->ack_count];
             if (!decode_ack(c, in, n, ack))
@@ -500,7 +500,7 @@ void data_poll(mist_conn *c)
         length = encode_frame(c, ref, size, plaintext);
         c->first_data = false;
     }
-    if (c->ack_pending && (ref.type || c->now >= c->ack_at)) {
+    if (c->ack_pending && (ref.type ? budget - length >= ACK_MIN_SIZE : c->now >= c->ack_at)) {
         uint8_t ack[14 + ACK_RANGES * 16];
         size_t ack_size = encode_ack(c, ack);
         if (!ref.type || (length + ack_size <= budget)) {

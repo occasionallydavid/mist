@@ -128,6 +128,7 @@ static void discard_application_state(mist_conn *c)
     c->flight_packets = 0;
     c->pto_at = NEVER;
     memset(c->sent, 0, sizeof c->sent);
+    c->sent_valid = c->sent_flight = (slot_set){0};
     c->connected_event = c->writable_event = c->random_event = false;
 }
 

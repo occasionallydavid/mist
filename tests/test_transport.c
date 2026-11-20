@@ -546,6 +546,62 @@ static void ack_ranges_and_deadlines(void)
     destroy(p);
 }
 
+static void ack_bitmap_wrap(void)
+{
+    pair p = endpoints(NULL);
+    for (uint64_t n = 0; n <= 2100; ++n) {
+        if (n != 2000 && n != 2001 && n != 2047 && n != 2048)
+            replay_accept(p.server, n, false, false);
+    }
+
+    uint8_t encoded[14 + ACK_RANGES * 16];
+    size_t size = encode_ack(p.server, encoded);
+    p.client->tx_number = 2101;
+    ack_frame ack;
+    assert(decode_ack(p.client, encoded, size, &ack) && ack.count == 3);
+    assert(ack.range[0].start == 2049 && ack.range[0].end == 2100);
+    assert(ack.range[1].start == 2002 && ack.range[1].end == 2046);
+    assert(ack.range[2].start == 53 && ack.range[2].end == 1999);
+    destroy(p);
+}
+
+static void loss_history_wrap(void)
+{
+    pair p = endpoints(NULL);
+    handshake(&p);
+    mist_conn *c = p.client;
+    assert(c->flight_packets == 0);
+    c->sent_cursor = TX_HISTORY - 2;
+    const frame_ref ping = {FRAME_PING, 0, 0};
+    for (uint64_t n = 10; n <= 14; n += 2) {
+        c->now += 500;
+        c->tx_number = n;
+        record_sent(c, 47, ping, false);
+    }
+    ++c->tx_number;
+    assert(c->sent_cursor == 1);
+
+    /* Packet 13 was ACK-only. Its ACK can still establish a loss threshold. */
+    ack_frame ack = {.largest = 13, .count = 1, .range = {{13, 13}}};
+    process_acks(c, &ack, 1);
+    assert(c->flight_packets == 2 && c->stats.packets_lost == 1);
+    uint64_t deadline = loss_deadline(c);
+    assert(deadline > c->now && deadline != NEVER);
+    c->now = deadline;
+    detect_loss(c);
+    assert(c->flight_packets == 1 && c->stats.packets_lost == 2);
+    assert(loss_deadline(c) == NEVER);
+
+    ack = (ack_frame){.largest = 12, .count = 1, .range = {{10, 12}}};
+    process_acks(c, &ack, 1);
+    assert(c->flight_packets == 1 && c->stats.bytes_in_flight == 47);
+    assert(slot_at_or_after(&c->sent_valid, 1) == NO_SLOT);
+    ack = (ack_frame){.largest = 14, .count = 1, .range = {{14, 14}}};
+    process_acks(c, &ack, 1);
+    assert(c->flight_packets == 0 && c->pto_at == NEVER);
+    destroy(p);
+}
+
 static void session_limits(void)
 {
     pair p = endpoints(NULL);
@@ -912,6 +968,8 @@ int main(void)
     pto_and_pacing();
     atomic_flow_feedback();
     ack_ranges_and_deadlines();
+    ack_bitmap_wrap();
+    loss_history_wrap();
     session_limits();
     scheduler_sparse_slots();
     for (unsigned i = 1; i <= 30; ++i)

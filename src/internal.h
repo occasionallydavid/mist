@@ -28,6 +28,7 @@
 #define PAGE_SIZE 256u
 #define REPLAY_BITS 2048u
 #define ACK_RANGES 16u
+#define ACK_MIN_SIZE 30u
 #define ACK_DELAY UINT64_C(25000)
 #define TX_HISTORY 1024u
 #define MAX_FLIGHT_PACKETS 512u
@@ -38,6 +39,7 @@
 #define NO_SLOT (SLOT_WORDS * 64u)
 
 _Static_assert(SLOT_WORDS <= 64, "slot sets use a single word of occupancy bits");
+_Static_assert(TX_HISTORY <= NO_SLOT, "packet history fits in a slot set");
 
 enum packet_type { PACKET_INIT = 1, PACKET_RESP, PACKET_DATA };
 enum frame_type {
@@ -116,7 +118,7 @@ typedef struct {
     uint64_t number, time;
     frame_ref ref;
     uint16_t size;
-    bool valid, outstanding;
+    bool outstanding;
 } sent_packet;
 
 typedef struct {
@@ -166,6 +168,7 @@ struct mist_conn {
     uint64_t tx_number, rx_largest, rx_largest_time;
     uint64_t replay[REPLAY_BITS / 64];
     sent_packet sent[TX_HISTORY];
+    slot_set sent_valid, sent_flight;
     unsigned sent_cursor, flight_packets;
     uint64_t largest_acked, recovery_number, ca_credit, pto_at;
     unsigned pto_backoff;
@@ -235,6 +238,12 @@ static inline unsigned slot_at_or_after(const slot_set *set, unsigned start)
         return NO_SLOT;
     word = first_bit(words);
     return word * 64u + first_bit(set->words[word]);
+}
+
+static inline unsigned flight_slot_at_or_after(const mist_conn *c, unsigned start)
+{
+    unsigned slot = slot_at_or_after(&c->sent_flight, start);
+    return slot == NO_SLOT ? slot_at_or_after(&c->sent_flight, 0) : slot;
 }
 
 uint64_t read_be(const uint8_t *p, unsigned n);

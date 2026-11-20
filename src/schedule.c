@@ -120,21 +120,22 @@ static frame_ref choose_stream(const mist_conn *c, size_t budget, bool lost, siz
 
 static frame_ref choose_probe(const mist_conn *c, size_t budget, size_t *size)
 {
-    const sent_packet *oldest = NULL;
-    for (unsigned i = 0; i < TX_HISTORY; ++i) {
+    unsigned first = flight_slot_at_or_after(c, c->sent_cursor);
+    unsigned i = first;
+    while (i != NO_SLOT) {
         const sent_packet *p = &c->sent[i];
-        if (!p->outstanding || (oldest && oldest->number < p->number) ||
-            p->ref.type != FRAME_STREAM)
-            continue;
-        stream *s = find_stream(c, p->ref.id);
-        chunk **item = find_chunk(s, p->ref.value);
-        if (item && (size_t)(*item)->sent_length + STREAM_HEADER <= budget) {
-            oldest = p;
-            *size = (*item)->sent_length + STREAM_HEADER;
+        if (p->ref.type == FRAME_STREAM) {
+            stream *s = find_stream(c, p->ref.id);
+            chunk **item = find_chunk(s, p->ref.value);
+            if (item && (size_t)(*item)->sent_length + STREAM_HEADER <= budget) {
+                *size = (*item)->sent_length + STREAM_HEADER;
+                return p->ref;
+            }
         }
+        i = flight_slot_at_or_after(c, i + 1);
+        if (i == first)
+            break;
     }
-    if (oldest)
-        return oldest->ref;
     *size = 1;
     return (frame_ref){FRAME_PING, 0, 0};
 }
