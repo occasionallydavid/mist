@@ -541,6 +541,49 @@ static void session_limits(void)
     destroy(p);
 }
 
+static void scheduler_sparse_slots(void)
+{
+    mist_config cfg;
+    mist_config_default(&cfg);
+    cfg.max_streams_bidi = MIST_MAX_INITIAL_STREAMS;
+    cfg.initial_max_stream_data = 4;
+    pair p = endpoints(&cfg);
+    handshake(&p);
+
+    /* Leave most scheduler slots empty, including whole bitmap words. */
+    const uint32_t ids[] = {0, 4 * 64, 4 * (MIST_MAX_INITIAL_STREAMS - 1)};
+    uint8_t frames[MAX_PLAINTEXT];
+    size_t n = 0;
+    for (unsigned i = 0; i < 3; ++i)
+        n += stream_frame(frames + n, ids[i], 0, false, NULL, 0);
+    inject(&p, 1, frames, n, false);
+    for (unsigned i = 0; i < 3; ++i) {
+        assert(event(p.server, MIST_STREAM_OPEN).stream_id == ids[i]);
+        assert(mist_stream_write(p.server, ids[i], (const uint8_t *)"abcdefgh", 8) == 8);
+    }
+
+    size_t size;
+    const size_t budget = STREAM_HEADER + 2;
+    p.server->schedule_slot[0] = 64;
+    frame_ref ref = choose_frame(p.server, budget, false, &size);
+    assert(ref.type == FRAME_STREAM && ref.id == ids[1] && size == budget);
+    encode_frame(p.server, ref, size, frames);
+
+    frame_lost(p.server, ref, p.server->tx_number);
+    frame_ref retry = choose_frame(p.server, budget, false, &size);
+    assert(retry.type == FRAME_STREAM && retry.id == ref.id && retry.value == ref.value);
+    frame_acked(p.server, ref);
+
+    const uint32_t order[] = {ids[2], ids[0], ids[1]};
+    for (unsigned i = 0; i < 3; ++i) {
+        ref = choose_frame(p.server, budget, false, &size);
+        assert(ref.type == FRAME_STREAM && ref.id == order[i] && size == budget);
+        encode_frame(p.server, ref, size, frames);
+        assert(read_be(frames + 5, 8) == (i == 2 ? 2u : 0u));
+    }
+    destroy(p);
+}
+
 #define STREAMS 3
 #define MESSAGES 25
 #define QUEUE 256
@@ -830,6 +873,7 @@ int main(void)
     atomic_flow_feedback();
     ack_ranges_and_deadlines();
     session_limits();
+    scheduler_sparse_slots();
     for (unsigned i = 1; i <= 30; ++i)
         simulated_network(i * 109);
     puts("transport simulation passed");

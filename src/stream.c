@@ -5,7 +5,7 @@ stream *find_stream(const mist_conn *c, uint32_t id)
     const stream_class *sc = &c->classes[id & 3u];
     if (!sc->capacity || !sc->slots)
         return NULL;
-    stream *s = sc->slots[(id >> 2) % sc->capacity];
+    stream *s = sc->slots[stream_slot(sc, id)];
     return s && s->id == id ? s : NULL;
 }
 
@@ -24,7 +24,9 @@ stream *new_stream(const mist_conn *c, uint32_t id)
 void insert_stream(mist_conn *c, stream *s)
 {
     stream_class *sc = &c->classes[s->id & 3u];
-    sc->slots[(s->id >> 2) % sc->capacity] = s;
+    unsigned slot = stream_slot(sc, s->id);
+    sc->slots[slot] = s;
+    slot_set_update(&sc->active, slot, true);
 }
 
 static void free_chunk(chunk *item)
@@ -132,10 +134,9 @@ void release_streams(mist_conn *c)
 {
     for (unsigned k = 0; k < 4; ++k) {
         stream_class *sc = &c->classes[k];
-        for (uint32_t i = 0; i < sc->capacity; ++i) {
+        for (unsigned i = slot_at_or_after(&sc->active, 0); i != NO_SLOT;
+             i = slot_at_or_after(&sc->active, i + 1)) {
             stream *s = sc->slots[i];
-            if (!s || s->retired)
-                continue;
             if (is_message(s->id)) {
                 if (is_local(c, s->id) && s->tx_fin_acked)
                     s->retired = true;
@@ -143,6 +144,8 @@ void release_streams(mist_conn *c)
                        s->rx_read == s->rx_final) {
                 s->retired = true;
             }
+            if (s->retired)
+                slot_set_update(&sc->active, i, false);
         }
         retire_class(c, k);
     }
@@ -167,6 +170,11 @@ static bool enqueue(mist_conn *c, stream *s, const uint8_t *data, size_t n, bool
     else
         s->head = item;
     s->tail = item;
+    if (!s->next_new) {
+        stream_class *sc = &c->classes[s->id & 3u];
+        s->next_new = item;
+        slot_set_update(&sc->tx_new, stream_slot(sc, s->id), true);
+    }
     s->tx_offset += n;
     s->tx_finished = fin;
     c->send_used += n;
@@ -430,9 +438,10 @@ uint64_t window_deadline(const mist_conn *c)
     uint64_t next = c->rx_credit.update_at ? c->rx_credit.update_at : NEVER;
     for (unsigned k = 0; k < 2; ++k) {
         const stream_class *sc = &c->classes[k];
-        for (uint32_t i = 0; i < sc->capacity; ++i) {
+        for (unsigned i = slot_at_or_after(&sc->active, 0); i != NO_SLOT;
+             i = slot_at_or_after(&sc->active, i + 1)) {
             const stream *s = sc->slots[i];
-            if (s && !s->retired && s->rx_credit.update_at)
+            if (s->rx_credit.update_at)
                 next = mist_min(next, s->rx_credit.update_at);
         }
     }
@@ -445,10 +454,10 @@ void refresh_windows(mist_conn *c)
         consume_credit(c, 0);
     for (unsigned k = 0; k < 2; ++k) {
         stream_class *sc = &c->classes[k];
-        for (uint32_t i = 0; i < sc->capacity; ++i) {
+        for (unsigned i = slot_at_or_after(&sc->active, 0); i != NO_SLOT;
+             i = slot_at_or_after(&sc->active, i + 1)) {
             stream *s = sc->slots[i];
-            if (s && !s->retired && s->rx_credit.update_at &&
-                c->now >= s->rx_credit.update_at)
+            if (s->rx_credit.update_at && c->now >= s->rx_credit.update_at)
                 increase_window(&s->rx_credit, s->rx_read,
                                 c->config.initial_max_stream_data, c->now);
         }
@@ -488,6 +497,8 @@ int mist_message_consume(mist_conn *c, uint32_t id)
     free(s->message);
     s->message = NULL;
     s->retired = true;
+    stream_class *sc = &c->classes[id & 3u];
+    slot_set_update(&sc->active, stream_slot(sc, id), false);
     retire_class(c, id & 3u);
     return MIST_OK;
 }
@@ -496,10 +507,9 @@ bool stream_event(mist_conn *c, mist_event *e)
 {
     for (unsigned k = 0; k < 4; ++k) {
         stream_class *sc = &c->classes[k];
-        for (uint32_t i = 0; i < sc->capacity; ++i) {
+        for (unsigned i = slot_at_or_after(&sc->active, 0); i != NO_SLOT;
+             i = slot_at_or_after(&sc->active, i + 1)) {
             stream *s = sc->slots[i];
-            if (!s || s->retired)
-                continue;
             e->stream_id = s->id;
             if (s->open_event) {
                 s->open_event = false;

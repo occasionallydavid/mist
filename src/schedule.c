@@ -49,9 +49,10 @@ static frame_ref choose_control(const mist_conn *c, size_t budget, bool probe, s
     }
     for (unsigned k = 0; k < 2 && budget >= 13; ++k) {
         const stream_class *sc = &c->classes[k];
-        for (uint32_t i = 0; i < sc->capacity; ++i) {
+        for (unsigned i = slot_at_or_after(&sc->active, 0); i != NO_SLOT;
+             i = slot_at_or_after(&sc->active, i + 1)) {
             const stream *s = sc->slots[i];
-            if (s && !s->retired && pending(&s->rx_credit, probe)) {
+            if (pending(&s->rx_credit, probe)) {
                 *size = 13;
                 return (frame_ref){FRAME_MAX_STREAM_DATA, s->id, s->rx_credit.limit};
             }
@@ -60,43 +61,59 @@ static frame_ref choose_control(const mist_conn *c, size_t budget, bool probe, s
     return nothing;
 }
 
-static frame_ref choose_stream(const mist_conn *c, size_t budget, bool lost,
-                               size_t *size)
+static const chunk *choose_chunk(const mist_conn *c, const stream *s, size_t budget,
+                                 bool lost, size_t *length)
+{
+    if (lost) {
+        for (const chunk *item = s->head; item; item = item->next) {
+            if (item->state == CHUNK_LOST && item->sent_length <= budget) {
+                *length = item->sent_length;
+                return item;
+            }
+            if (item == s->next_new)
+                break;
+        }
+        return NULL;
+    }
+
+    const chunk *item = s->next_new;
+    uint64_t offset = item->offset + item->used;
+    if (offset > s->tx_high || offset > s->tx_limit)
+        return NULL;
+    uint64_t limit = mist_min(s->tx_limit, mist_add(s->tx_high, c->tx_limit - c->tx_accounted));
+    size_t remaining = item->length - item->used;
+    *length = (size_t)mist_min(remaining, mist_min(limit - offset, budget));
+    if ((remaining && !*length) || (is_message(s->id) && *length < remaining))
+        return NULL;
+    return item;
+}
+
+static frame_ref choose_stream(const mist_conn *c, size_t budget, bool lost, size_t *size)
 {
     if (budget < STREAM_HEADER)
         return nothing;
     for (unsigned n = 0; n < 4; ++n) {
         unsigned k = (c->schedule_class + n) % 4;
         const stream_class *sc = &c->classes[k];
-        for (uint32_t i = 0; i < sc->capacity; ++i) {
-            const stream *s = sc->slots[(c->schedule_slot[k] + i) % sc->capacity];
-            if (!s || s->retired)
-                continue;
-            for (const chunk *item = s->head; item; item = item->next) {
-                if (lost) {
-                    if (item->state == CHUNK_LOST &&
-                        item->sent_length <= budget - STREAM_HEADER) {
-                        *size = STREAM_HEADER + item->sent_length;
-                        return (frame_ref){FRAME_STREAM, s->id, item->token};
-                    }
-                    continue;
-                }
-                if (item->state != CHUNK_NEW)
-                    continue;
-                uint64_t offset = item->offset + item->used;
-                if (offset > s->tx_high || offset > s->tx_limit)
-                    break;
-                uint64_t limit = mist_min(s->tx_limit, mist_add(s->tx_high,
-                                                          c->tx_limit - c->tx_accounted));
-                size_t remaining = item->length - item->used;
-                size_t length = (size_t)mist_min(remaining, limit - offset);
-                length = (size_t)mist_min(length, budget - STREAM_HEADER);
-                if ((remaining && !length) || (is_message(s->id) && length < remaining))
-                    break;
+        const slot_set *ready = lost ? &sc->tx_lost : &sc->tx_new;
+        if (!ready->occupied)
+            continue;
+        unsigned i = slot_at_or_after(ready, c->schedule_slot[k]);
+        if (i == NO_SLOT)
+            i = slot_at_or_after(ready, 0);
+        unsigned first = i;
+        do {
+            const stream *s = sc->slots[i];
+            size_t length;
+            const chunk *item = choose_chunk(c, s, budget - STREAM_HEADER, lost, &length);
+            if (item) {
                 *size = STREAM_HEADER + length;
                 return (frame_ref){FRAME_STREAM, s->id, item->token};
             }
-        }
+            i = slot_at_or_after(ready, i + 1);
+            if (i == NO_SLOT)
+                i = slot_at_or_after(ready, 0);
+        } while (i != first);
     }
     return nothing;
 }
@@ -143,6 +160,12 @@ frame_ref choose_frame(const mist_conn *c, size_t budget, bool probe, size_t *si
     return ref;
 }
 
+static void remove_lost(stream_class *sc, stream *s, const chunk *item)
+{
+    if (item->state == CHUNK_LOST && !--s->lost_chunks)
+        slot_set_update(&sc->tx_lost, stream_slot(sc, s->id), false);
+}
+
 size_t encode_frame(mist_conn *c, frame_ref ref, size_t size, uint8_t *out)
 {
     out[0] = ref.type;
@@ -151,7 +174,18 @@ size_t encode_frame(mist_conn *c, frame_ref ref, size_t size, uint8_t *out)
         return 1;
     case FRAME_STREAM: {
         stream *s = find_stream(c, ref.id);
-        chunk *item = *find_chunk(s, ref.value);
+        unsigned kind = s->id & 3u;
+        stream_class *sc = &c->classes[kind];
+        unsigned slot = stream_slot(sc, s->id);
+        chunk *item = s->next_new;
+        if (!item || item->token != ref.value) {
+            item = *find_chunk(s, ref.value);
+            remove_lost(sc, s, item);
+        } else {
+            s->next_new = item->next;
+            if (!s->next_new)
+                slot_set_update(&sc->tx_new, slot, false);
+        }
         uint64_t offset = item->offset + item->used;
         size_t length = size - STREAM_HEADER;
         write_be(out + 1, s->id, 4);
@@ -168,8 +202,7 @@ size_t encode_frame(mist_conn *c, frame_ref ref, size_t size, uint8_t *out)
         item->sent_length = (uint16_t)length;
         item->packet = c->tx_number;
         item->state = CHUNK_IN_FLIGHT;
-        unsigned kind = s->id & 3u;
-        c->schedule_slot[kind] = ((s->id >> 2) + 1) % c->classes[kind].capacity;
+        c->schedule_slot[kind] = slot + 1 == sc->capacity ? 0 : slot + 1;
         c->schedule_class = (kind + 1) % 4;
         return size;
     }
@@ -202,10 +235,15 @@ void frame_acked(mist_conn *c, frame_ref ref)
         if (!link)
             return;
         chunk *item = *link;
+        stream_class *sc = &c->classes[s->id & 3u];
+        remove_lost(sc, s, item);
         item->used += item->sent_length;
         if (item->used != item->length) {
             item->token = ++c->token_next;
             item->state = CHUNK_NEW;
+            /* Later offsets are blocked until the remainder is sent. */
+            s->next_new = item;
+            slot_set_update(&sc->tx_new, stream_slot(sc, s->id), true);
             return;
         }
         if (item->fin)
@@ -233,9 +271,15 @@ void frame_acked(mist_conn *c, frame_ref ref)
 void frame_lost(mist_conn *c, frame_ref ref, uint64_t number)
 {
     if (ref.type == FRAME_STREAM) {
-        chunk **item = find_chunk(find_stream(c, ref.id), ref.value);
-        if (item && (*item)->packet == number)
-            (*item)->state = CHUNK_LOST;
+        stream *s = find_stream(c, ref.id);
+        chunk **link = find_chunk(s, ref.value);
+        if (link && (*link)->packet == number && (*link)->state == CHUNK_IN_FLIGHT) {
+            (*link)->state = CHUNK_LOST;
+            if (++s->lost_chunks == 1) {
+                stream_class *sc = &c->classes[s->id & 3u];
+                slot_set_update(&sc->tx_lost, stream_slot(sc, s->id), true);
+            }
+        }
     } else {
         credit *cr = get_credit(c, ref);
         if (cr && cr->packet == number && cr->acked < cr->sent)

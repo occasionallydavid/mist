@@ -34,6 +34,10 @@
 #define MAX_CHUNKS 16384u
 #define RECENT_COMPLETIONS 64u
 #define MIN_CWND (2u * MIST_MAX_DATAGRAM)
+#define SLOT_WORDS ((MIST_MAX_INITIAL_STREAMS + 63u) / 64u)
+#define NO_SLOT (SLOT_WORDS * 64u)
+
+_Static_assert(SLOT_WORDS <= 64, "slot sets use a single word of occupancy bits");
 
 enum packet_type { PACKET_INIT = 1, PACKET_RESP, PACKET_DATA };
 enum frame_type {
@@ -79,7 +83,8 @@ typedef struct stream {
     page *pages;
     uint8_t *message;
     uint8_t message_digest[32];
-    chunk *head, *tail;
+    chunk *head, *tail, *next_new;
+    unsigned lost_chunks;
 } stream;
 
 typedef struct {
@@ -90,8 +95,13 @@ typedef struct {
 } completion;
 
 typedef struct {
+    uint64_t words[SLOT_WORDS], occupied;
+} slot_set;
+
+typedef struct {
     stream **slots;
     uint32_t capacity, next, retired, peer_limit;
+    slot_set active, tx_new, tx_lost;
     credit rx_credit;
     completion recent[RECENT_COMPLETIONS];
 } stream_class;
@@ -173,6 +183,59 @@ static inline bool is_local(const mist_conn *c, uint32_t id)
     return (id & 1u) == (unsigned)c->server;
 }
 static inline bool is_message(uint32_t id) { return (id & 2u) != 0; }
+
+static inline unsigned stream_slot(const stream_class *sc, uint32_t id)
+{
+    return (id >> 2) % sc->capacity;
+}
+
+static inline void slot_set_update(slot_set *set, unsigned slot, bool present)
+{
+    unsigned word = slot / 64u;
+    uint64_t bit = UINT64_C(1) << (slot % 64u);
+    uint64_t word_bit = UINT64_C(1) << word;
+    if (present) {
+        set->words[word] |= bit;
+        set->occupied |= word_bit;
+    } else {
+        set->words[word] &= ~bit;
+        if (!set->words[word])
+            set->occupied &= ~word_bit;
+    }
+}
+
+static inline unsigned first_bit(uint64_t bits)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return (unsigned)__builtin_ctzll(bits);
+#else
+    unsigned bit = 0;
+    while (!(bits & 1u)) {
+        ++bit;
+        bits >>= 1;
+    }
+    return bit;
+#endif
+}
+
+/* Find the first member at or after start without walking empty words. */
+static inline unsigned slot_at_or_after(const slot_set *set, unsigned start)
+{
+    if (start >= NO_SLOT)
+        return NO_SLOT;
+    unsigned word = start / 64u;
+    uint64_t words = set->occupied & (UINT64_MAX << word);
+    if (!words)
+        return NO_SLOT;
+    uint64_t bits = set->words[word] & (UINT64_MAX << (start % 64u));
+    if (bits)
+        return word * 64u + first_bit(bits);
+    words &= ~(UINT64_C(1) << word);
+    if (!words)
+        return NO_SLOT;
+    word = first_bit(words);
+    return word * 64u + first_bit(set->words[word]);
+}
 
 uint64_t read_be(const uint8_t *p, unsigned n);
 void write_be(uint8_t *p, uint64_t v, unsigned n);
