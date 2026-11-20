@@ -1,0 +1,17 @@
+[package]
+name = "mp-sandbox"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mist = { path = "../rust", default-features = false, features = ["toki"] }
+toki = { version = "0.1.0", default-features = false, features = ["tokio-compat"] }
+tokio = { version = "1.54.1", default-features = false }
+
+[profile.production]
+inherits = "release"
+codegen-units = 1
+opt-level = "z"  # Optimize for size.
+lto = "fat"
+strip = true  # Automatically strip symbols from the binary.
+panic = "abort"

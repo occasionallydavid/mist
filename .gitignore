@@ -4,3 +4,4 @@
 /core/timeout-*
 /rust/target/
 /rust/Cargo.lock
+/standalone/target/
